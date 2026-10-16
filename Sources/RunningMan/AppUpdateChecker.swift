@@ -1,0 +1,134 @@
+import AppKit
+import Foundation
+import RunningManCore
+
+/// App-level update state: restores the last announced release, runs the daily
+/// check when due and answers Check for Updates. All state is observed through
+/// this one object (the banner, the settings pane and the menu read it).
+@Observable @MainActor
+final class AppUpdateChecker {
+    private(set) var available: AppRelease?
+    private(set) var checking = false
+    private(set) var lastCheck: Date?
+    /// Set by the banner's Later button for this run only.
+    var bannerDismissed = false
+
+    var showsBanner: Bool { available != nil && !bannerDismissed }
+
+    /// The skipped version, kept across runs so a skipped release stays silent.
+    private(set) var skippedVersion: String? {
+        didSet {
+            if let skippedVersion { defaults.set(skippedVersion, forKey: Self.skippedKey) }
+            else { defaults.removeObject(forKey: Self.skippedKey) }
+        }
+    }
+
+    static let lastCheckKey = "appUpdate.lastSuccessfulCheck"
+    static let manifestKey = "appUpdate.latestManifest"
+    static let skippedKey = "appUpdate.skippedVersion"
+    static let automaticKey = "appUpdate.automaticChecks"
+
+    private let defaults: UserDefaults
+    private let appVersion: String
+    private let fetch: (String) async throws -> Data
+    private var task: Task<Void, Never>?
+
+    /// `isReleaseBuild` false keeps dev and snapshot builds quiet: only builds
+    /// carrying a plain X.Y.Z version ask the manifest anything.
+    var isReleaseBuild: Bool { AppUpdateCheck.isReleaseVersion(appVersion) }
+
+    init(defaults: UserDefaults = .standard,
+         appVersion: String? = nil,
+         fetch: @escaping (String) async throws -> Data = { try await AppUpdateCheck.fetch(appVersion: $0) }) {
+        self.defaults = defaults
+        self.appVersion = appVersion ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
+        self.fetch = fetch
+        lastCheck = defaults.object(forKey: Self.lastCheckKey) as? Date
+        skippedVersion = defaults.string(forKey: Self.skippedKey)
+        // A stored manifest already announces its release while the network is away.
+        if let data = defaults.data(forKey: Self.manifestKey),
+           let release = try? AppUpdateCheck.release(from: data),
+           case .available = AppUpdateCheck.status(of: release, runningVersion: self.appVersion, skippedVersion: skippedVersion) {
+            available = release
+        }
+    }
+
+    /// Called once at launch: checks only when automatic checks are on (default),
+    /// the build is a release build and a check is due.
+    func startAutomatic(now: Date = Date()) {
+        guard isReleaseBuild, defaults.object(forKey: Self.automaticKey) as? Bool ?? true,
+              AppUpdateCheck.isDue(lastSuccess: lastCheck, now: now) else { return }
+        run(manual: false)
+    }
+
+    /// Menu command: always fetches and reports the outcome, good or bad.
+    func checkNow() {
+        run(manual: true)
+    }
+
+    func skip(_ release: AppRelease) {
+        skippedVersion = release.version
+        if available == release { available = nil }
+    }
+
+    private func run(manual: Bool) {
+        guard !checking else { return }
+        if manual, !isReleaseBuild {
+            alert(title: "Update checks are off in this build",
+                  message: "Update checks run in released versions of RunningMan. This build is \(appVersion.isEmpty ? "a development build" : appVersion).")
+            return
+        }
+        checking = true
+        let version = appVersion
+        let fetch = self.fetch
+        task = Task { @MainActor [weak self] in
+            defer { self?.checking = false }
+            do {
+                let data = try await fetch(version)
+                let release = try AppUpdateCheck.release(from: data)
+                self?.defaults.set(data, forKey: Self.manifestKey)
+                self?.defaults.set(Date(), forKey: Self.lastCheckKey)
+                self?.lastCheck = Date()
+                let status = AppUpdateCheck.status(of: release, runningVersion: version, skippedVersion: self?.skippedVersion)
+                switch status {
+                case .available(let release):
+                    self?.available = release
+                    self?.bannerDismissed = false
+                    if manual { self?.alertUpdate(release) }
+                case .skipped(let release):
+                    self?.available = nil
+                    if manual { self?.alert(title: "Version \(release.version) is skipped", message: "RunningMan \(release.version) is available, but you chose to skip it.") }
+                case .upToDate(let newest):
+                    self?.available = nil
+                    if manual { self?.alert(title: "You're up to date", message: "RunningMan \(version) is the latest version (newest release: \(newest.version)).") }
+                }
+            } catch {
+                if manual {
+                    self?.alert(title: "Could not check for updates", message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func alertUpdate(_ release: AppRelease) {
+        let alert = NSAlert()
+        alert.messageText = "RunningMan \(release.version) is available"
+        alert.informativeText = "You are running \(appVersion). Download the new version from the release page and replace the app."
+        alert.addButton(withTitle: "View Release")
+        alert.addButton(withTitle: "Skip This Version")
+        alert.addButton(withTitle: "Later")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: NSWorkspace.shared.open(release.releasePage)
+        case .alertSecondButtonReturn: skip(release)
+        default: break
+        }
+    }
+
+    private func alert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+}

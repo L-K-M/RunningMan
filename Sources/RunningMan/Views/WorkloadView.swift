@@ -1,0 +1,286 @@
+import SwiftUI
+import RunningManCore
+
+struct WorkloadView: View {
+    @Environment(AppModel.self) private var model
+    private var scopes: [WorkloadScopeSnapshot] { model.visibleWorkloadScopes }
+    private var compatibleJobs: [WorkloadJob] {
+        var jobs: [String: WorkloadJob] = [:]
+        for scope in scopes {
+            guard let queued = scope.compatibleQueuedJobs, let running = scope.compatibleRunningJobs else { continue }
+            for job in queued + running { jobs[job.id] = job }
+        }
+        return Array(jobs.values)
+    }
+    private var hasQueueEvidence: Bool {
+        scopes.contains { $0.compatibleQueuedJobs != nil }
+    }
+    private var incomplete: Bool {
+        scopes.contains { scope in
+            scope.state != .available || scope.compatibleQueuedJobs == nil
+        }
+    }
+    private var queueCount: Int { compatibleJobs.filter { $0.state == .queued }.count }
+    private var oldest: Date? { compatibleJobs.filter { $0.state == .queued }.compactMap(\.createdAt).min() }
+    private func queue(for runnerID: String) -> Int {
+        guard let scope = model.workloadScope(for: runnerID), let jobs = scope.compatibleQueuedJobs,
+              let labels = scope.runnerLabels[runnerID] else { return -1 }
+        return jobs.filter { WorkloadScopeSnapshot.matches(jobLabels: $0.labels, runnerLabels: labels, provider: scope.provider) }.count
+    }
+    private var activityRunners: [RunnerSnapshot] {
+        model.runners.sorted { left, right in
+            let a = queue(for: left.id), b = queue(for: right.id)
+            if a != b { return a > b }
+            let busyA = model.observedUsage[left.id]?.busyFraction ?? -1
+            let busyB = model.observedUsage[right.id]?.busyFraction ?? -1
+            if busyA != busyB { return busyA > busyB }
+            return left.runner.name.localizedStandardCompare(right.runner.name) == .orderedAscending
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack(alignment: .top) {
+                    PageHeading(eyebrow: "Queue intelligence", title: "How busy is your fleet?",
+                                subtitle: "Compatible server queues and activity observed on this Mac.")
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 9) {
+                        Button("Connect Forgejo…", systemImage: "network.badge.shield.half.filled") { model.showingForgejoConnection = true }
+                            .controlSize(.small)
+                        Button {
+                            Task { await model.refreshWorkload(force: true) }
+                        } label: {
+                            Label(model.isRefreshingWorkload ? "Checking queues…" : "Refresh queues", systemImage: "arrow.clockwise")
+                        }.controlSize(.small).disabled(model.isRefreshingWorkload || !model.remoteMonitoringEnabled)
+                            .help("Queue snapshots refresh at most once a minute and respect server rate limits.")
+                    }
+                }
+                if !model.remoteMonitoringEnabled {
+                    Surface {
+                        Label("Server monitoring is off", systemImage: "pause.circle").font(.headline)
+                        Text("Local status and recorded usage still work. Enable server monitoring to read queued and active jobs.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary).padding(.top, 6)
+                        Button("Enable server monitoring") {
+                            model.remoteMonitoringEnabled = true
+                            Task { await model.refreshWorkload(force: true) }
+                        }.padding(.top, 12)
+                    }
+                }
+                HStack(spacing: 12) {
+                    metric("Compatible queued", value: hasQueueEvidence ? "\(queueCount)\(incomplete ? "+" : "")" : "—",
+                           note: "Shared across matching runners", symbol: "tray.full", color: queueCount > 0 ? .orange : .indigo)
+                    metric("Oldest queued", value: oldest.map { formattedDuration(Date().timeIntervalSince($0)) } ?? "—",
+                           note: "When the server reports its age", symbol: "hourglass", color: .orange)
+                    metric("Busy runners", value: "\(model.busyCount)", note: "At least one active job", symbol: "bolt.fill", color: .indigo)
+                    metric("Configured slots", value: "\(model.runners.reduce(0) { $0 + $1.runner.capacity })",
+                           note: "Local concurrency limit", symbol: "square.stack.3d.up", color: RunningManStyle.teal)
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    SectionHeading(title: "Runner activity", subtitle: "Last 24 hours · sampled while RunningMan is monitoring") { EmptyView() }
+                    if model.runners.isEmpty {
+                        Surface { EmptyPanel(symbol: "chart.bar", title: "Add a runner to begin", message: "Activity and compatible queues appear for installed runners.") }
+                    } else {
+                        Surface(padding: 0) {
+                            VStack(spacing: 0) {
+                                ForEach(Array(activityRunners.enumerated()), id: \.element.id) { index, snapshot in
+                                    RunnerWorkloadRow(snapshot: snapshot)
+                                    if index < activityRunners.count - 1 { Divider().padding(.leading, 20) }
+                                }
+                            }
+                        }
+                    }
+                    Text("Busy rate is sampled time with at least one active job divided by time observed. Gaps and uncertain states are excluded. It does not measure CPU load or occupied slots on multi-job runners.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    SectionHeading(title: "Server queues", subtitle: "Jobs waiting for compatible labels, grouped by registration scope") {
+                        if let date = scopes.map(\.checkedAt).min() {
+                            Text("Data since \(date.formatted(date: .omitted, time: .shortened))")
+                                .font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                    }
+                    if scopes.isEmpty {
+                        Surface {
+                            EmptyPanel(symbol: "network", title: model.isRefreshingWorkload ? "Reading server queues…" : "No queue data yet",
+                                       message: "GitHub uses your signed-in CLI. Forgejo uses a server connection saved in Keychain. A configured runner supplies the scope to monitor.")
+                                .frame(minHeight: 130)
+                        }
+                    } else {
+                        ForEach(scopes) { scope in WorkloadScopeCard(scope: scope) }
+                    }
+                }
+                Label("A queued job belongs to a compatible pool. Other machines may claim it. Partial access or scan limits are shown explicitly; unavailable data is never counted as an empty queue.",
+                      systemImage: "info.circle")
+                    .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }.padding(28).frame(maxWidth: 1400).frame(maxWidth: .infinity)
+        }
+    }
+
+    private func metric(_ title: String, value: String, note: String, symbol: String, color: Color) -> some View {
+        Surface(padding: 16) {
+            HStack {
+                Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                Spacer(minLength: 2)
+                Image(systemName: symbol).foregroundStyle(color)
+            }
+            Text(value).font(.system(size: 29, weight: .semibold, design: .rounded)).monospacedDigit().padding(.top, 9)
+            Text(note).font(.system(size: 10)).foregroundStyle(.secondary).padding(.top, 3)
+        }
+    }
+}
+
+struct RunnerWorkloadRow: View {
+    @Environment(AppModel.self) private var model
+    let snapshot: RunnerSnapshot
+    private var observed: ObservedRunnerUsage? { model.observedUsage[snapshot.id] }
+    private var history: RunnerUsageMetrics { model.usage(for: snapshot.runner) }
+    private var queue: Int? {
+        guard let scope = model.workloadScope(for: snapshot.id), let queued = scope.compatibleQueuedJobs,
+              let labels = scope.runnerLabels[snapshot.id] else { return nil }
+        return queued.filter { WorkloadScopeSnapshot.matches(jobLabels: $0.labels, runnerLabels: labels, provider: scope.provider) }.count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Button(snapshot.runner.name) {
+                        model.selectedRunnerID = snapshot.id
+                        model.section = .runners
+                    }.buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
+                    Text("\(snapshot.runner.provider.title) · \(snapshot.runner.capacity) \(snapshot.runner.capacity == 1 ? "slot" : "slots")")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }.frame(minWidth: 140, alignment: .leading)
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text(observed?.busyFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—")
+                        .font(.system(size: 21, weight: .semibold, design: .rounded)).monospacedDigit()
+                    Text("Busy while observed").font(.system(size: 9)).foregroundStyle(.secondary)
+                }.frame(width: 125, alignment: .trailing)
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text("\(history.completedJobs)").font(.system(size: 18, weight: .semibold, design: .rounded))
+                    Text("Recorded jobs · 24h").font(.system(size: 9)).foregroundStyle(.secondary)
+                }.frame(width: 110, alignment: .trailing)
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text(queue.map(String.init) ?? "—").font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .foregroundStyle((queue ?? 0) > 0 ? Color.orange : .primary)
+                    Text("Compatible queue").font(.system(size: 9)).foregroundStyle(.secondary)
+                }.frame(width: 110, alignment: .trailing)
+            }
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.primary.opacity(0.05))
+                    Capsule().fill(RunningManStyle.teal).frame(width: geometry.size.width * min(1, observed?.busyFraction ?? 0))
+                }
+            }.frame(height: 5).accessibilityHidden(true)
+            HStack {
+                Text(observed.map { "\(formattedDuration($0.observedSeconds)) observed · \(formattedDuration($0.busySeconds)) busy" } ?? "Waiting for two activity samples")
+                Spacer()
+                if let duration = history.medianDuration { Text("Median job \(formattedDuration(duration))") }
+            }.font(.system(size: 9)).foregroundStyle(.secondary)
+        }.padding(18)
+    }
+}
+
+private struct WorkloadScopeCard: View {
+    @Environment(AppModel.self) private var model
+    let scope: WorkloadScopeSnapshot
+    private var matching: [WorkloadJob] {
+        let jobs = Dictionary(scope.jobs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return jobs.values.sorted {
+            if $0.state == .queued && $1.state != .queued { return true }
+            if $0.state != .queued && $1.state == .queued { return false }
+            return ($0.createdAt ?? .distantFuture) < ($1.createdAt ?? .distantFuture)
+        }
+    }
+    private var countsKnown: Bool { scope.compatibleQueuedJobs != nil }
+    var body: some View {
+        Surface {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(scope.provider.title.uppercased()).font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(.indigo)
+                    Button(scope.scopeTitle.map { $0 + " · " + (scope.scopeURL.host ?? "") }
+                        ?? scope.scopeURL.host.map { $0 + scope.scopeURL.path } ?? scope.scopeURL.absoluteString) { model.openServerLink(scope.scopeURL) }
+                        .buttonStyle(.plain).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                }
+                Spacer()
+                Label(scope.state == .available ? "Visible queue" : scope.state == .partial ? "Partial visibility" : "Unavailable",
+                      systemImage: scope.state == .available ? "checkmark.circle" : "exclamationmark.triangle")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(scope.state == .available ? RunningManStyle.teal : .orange)
+            }
+            if let message = scope.message {
+                Text(message).font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled).padding(.top, 10)
+            }
+            Text("Checked \(scope.checkedAt.formatted(date: .omitted, time: .shortened))")
+                .font(.system(size: 9)).foregroundStyle(.secondary).padding(.top, 6)
+            if scope.state != .unavailable {
+                HStack(spacing: 18) {
+                    Label(scope.compatibleQueuedJobs.map { "\($0.count) compatible queued" } ?? "Queue count unavailable", systemImage: "tray.full")
+                    Text(scope.compatibleRunningJobs.map { "\($0.count) running in compatible pools" } ?? "Running count unavailable")
+                    Text("\(scope.capacity) local slots")
+                }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.top, 13)
+                if !matching.isEmpty {
+                    Divider().padding(.vertical, 12)
+                    ForEach(matching.prefix(6)) { job in
+                        HStack(spacing: 10) {
+                            Image(systemName: job.state == .running ? "bolt.fill" : job.state == .queued ? "hourglass" : "pause.circle")
+                                .foregroundStyle(job.state == .queued ? Color.orange : .indigo).frame(width: 18)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(job.name).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                                Text(job.repository + (job.labels.isEmpty ? "" : " · " + job.labels.joined(separator: ", ")))
+                                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer()
+                            Text(job.state.title).font(.system(size: 10)).foregroundStyle(.secondary)
+                            if let url = job.url {
+                                Button { model.openServerLink(url) } label: { Image(systemName: "arrow.up.right") }
+                                    .buttonStyle(.plain).help("Open job on \(scope.provider.title)")
+                            }
+                        }.padding(.vertical, 7)
+                    }
+                    if matching.count > 6 { Text("\(matching.count - 6) more compatible jobs").font(.system(size: 10)).foregroundStyle(.secondary).padding(.top, 7) }
+                } else if countsKnown {
+                    Text("No compatible jobs in this visible snapshot.").font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 11)
+                }
+            }
+        }
+    }
+}
+
+struct ForgejoConnectionSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var server = ""
+    @State private var token = ""
+    @State private var connecting = false
+    @State private var message = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            PageHeading(eyebrow: "Server connection", title: "Connect Forgejo", subtitle: "Keep credentials in your login Keychain.")
+            TextField("Server URL", text: $server, prompt: Text("https://forge.example.com")).textFieldStyle(.roundedBorder).disabled(connecting)
+            SecureField("Access token", text: $token, prompt: Text("Leave empty to check the saved connection")).textFieldStyle(.roundedBorder).disabled(connecting)
+            Text("Use a token with read access to Actions jobs for monitoring. Creating or removing runners also needs runner-management access for the chosen scope.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            if !message.isEmpty { Text(message).font(.system(size: 11)).foregroundStyle(.orange).textSelection(.enabled) }
+            HStack {
+                Button("Cancel") { token = ""; dismiss() }.keyboardShortcut(.cancelAction).disabled(connecting)
+                Spacer()
+                if connecting { ProgressView().controlSize(.small) }
+                Button(connecting ? "Connecting…" : "Connect") {
+                    let submittedServer = server, submittedToken = token
+                    connecting = true
+                    Task {
+                        let success = await model.connectForgejo(server: submittedServer, token: submittedToken)
+                        if success { token = ""; dismiss() }
+                        else { message = model.errorMessage ?? "Connection failed" }
+                        connecting = false
+                    }
+                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(connecting || server.isEmpty)
+            }
+        }.padding(28).frame(width: 520)
+            .onAppear { server = model.demoMode ? "https://forge.example.com" : model.defaultForgejoServer }
+            .interactiveDismissDisabled(connecting)
+    }
+}
