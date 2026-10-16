@@ -76,8 +76,7 @@ jobs:
           app="dist/RunningMan.app"
           plutil -lint "$app/Contents/Info.plist"
           test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "${TAG#v}"
-          lipo -verify_arch arm64 "$app/Contents/MacOS/RunningMan"
-          lipo -verify_arch x86_64 "$app/Contents/MacOS/RunningMan"
+          lipo "$app/Contents/MacOS/RunningMan" -verify_arch arm64 x86_64
           test -s "$app/Contents/Resources/AppIcon.icns"
           codesign --verify --strict "$app"
 

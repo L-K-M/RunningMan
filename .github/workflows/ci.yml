@@ -31,8 +31,7 @@ jobs:
         run: scripts/build-app.sh --universal --zip
       - name: Check architectures
         run: |
-          lipo -verify_arch arm64 "dist/RunningMan.app/Contents/MacOS/RunningMan"
-          lipo -verify_arch x86_64 "dist/RunningMan.app/Contents/MacOS/RunningMan"
+          lipo "dist/RunningMan.app/Contents/MacOS/RunningMan" -verify_arch arm64 x86_64
       - name: Render isolated preview
         run: scripts/smoke-test.sh
       - name: Upload app
