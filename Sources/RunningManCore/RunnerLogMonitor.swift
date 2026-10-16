@@ -30,7 +30,7 @@ public actor RunnerLogMonitor {
         var warnings: [String] = []
         var events: [ActivityEvent] = []
         var livePaths = Set<String>()
-        for runner in runners {
+        for runner in runners where runner.provider == .github {
             let directory = runner.directory.appendingPathComponent("_diag")
             guard let urls = try? FileManager.default.contentsOfDirectory(at: directory,
                 includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) else { continue }

@@ -6,13 +6,13 @@ import RunningManServices
 import UniformTypeIdentifiers
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case overview, runners, history
+    case overview, runners, workload, history
     var id: String { rawValue }
     var title: String {
-        switch self { case .overview: return "Overview"; case .runners: return "Runners"; case .history: return "Job history" }
+        switch self { case .overview: return "Overview"; case .runners: return "Runners"; case .workload: return "Workload"; case .history: return "Job history" }
     }
     var systemImage: String {
-        switch self { case .overview: return "square.grid.2x2"; case .runners: return "server.rack"; case .history: return "clock.arrow.circlepath" }
+        switch self { case .overview: return "square.grid.2x2"; case .runners: return "server.rack"; case .workload: return "chart.bar.xaxis"; case .history: return "clock.arrow.circlepath" }
     }
 }
 
@@ -31,6 +31,22 @@ final class AppModel {
     var jobs: [RunnerJob] = []
     var events: [ActivityEvent] = []
     var warnings: [String] = []
+    var workload: WorkloadReport?
+    var observedUsage: [String: ObservedRunnerUsage] = [:]
+    var isRefreshingWorkload = false
+    var showingForgejoConnection = false { didSet { if showingForgejoConnection { showMainWindow?() } } }
+    var forgejoServers: [URL] = []
+    var forgejoAccount: String?
+    var defaultForgejoServer = ""
+    var remoteMonitoringEnabled = false {
+        didSet {
+            if !demoMode { UserDefaults.standard.set(remoteMonitoringEnabled, forKey: "remoteMonitoringEnabled") }
+            if !remoteMonitoringEnabled {
+                workloadTask?.cancel()
+                workload = nil
+            }
+        }
+    }
     var selectedRunnerID: String?
     var section: AppSection = .overview
     var searchText = ""
@@ -61,9 +77,16 @@ final class AppModel {
     @ObservationIgnored private let logs = RunnerLogMonitor()
     @ObservationIgnored private let controller = RunnerServiceController()
     @ObservationIgnored private let installer = GitHubRunnerInstaller()
+    @ObservationIgnored private let forgejoInstaller = ForgejoRunnerInstaller()
+    @ObservationIgnored private let forgejoConnections = ForgejoConnectionStore()
+    @ObservationIgnored private let forgejoLogs = ForgejoLogMonitor()
+    @ObservationIgnored private let workloadMonitor = WorkloadMonitor()
     @ObservationIgnored private let history: RunnerHistoryStore
     @ObservationIgnored private let eventStore: ActivityStore
+    @ObservationIgnored private let activitySamples: RunnerActivityStore
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
+    @ObservationIgnored private var workloadTask: Task<WorkloadReport, Never>?
+    @ObservationIgnored private var lastWorkloadAttempt: Date?
     @ObservationIgnored private var pendingAction: (() -> Void)?
     @ObservationIgnored private var sleepPrevention: Process?
     @ObservationIgnored private var logTails: [String: String] = [:]
@@ -80,12 +103,17 @@ final class AppModel {
         self.demoMode = demoMode
         history = RunnerHistoryStore(fileURL: Self.supportDirectory.appendingPathComponent("jobs.json"))
         eventStore = ActivityStore(url: Self.supportDirectory.appendingPathComponent("activity.json"))
+        activitySamples = RunnerActivityStore(fileURL: Self.supportDirectory.appendingPathComponent("observed-activity.json"))
         if demoMode {
+            remoteMonitoringEnabled = true
             loadDemo()
         } else {
             let preferences = UserDefaults.standard
             refreshAutomatically = preferences.object(forKey: "refreshAutomatically") as? Bool ?? true
             keepAwakeWhileBusy = preferences.bool(forKey: "keepAwakeWhileBusy")
+            remoteMonitoringEnabled = preferences.object(forKey: "remoteMonitoringEnabled") as? Bool ?? false
+            forgejoServers = (preferences.stringArray(forKey: "forgejoServers") ?? []).compactMap(URL.init(string:))
+            defaultForgejoServer = preferences.string(forKey: "defaultForgejoServer") ?? forgejoServers.first?.absoluteString ?? ""
             importedDirectories = (preferences.stringArray(forKey: "importedRunnerDirectories") ?? [])
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
         }
@@ -95,7 +123,7 @@ final class AppModel {
     var filteredRunners: [RunnerSnapshot] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         return query.isEmpty ? runners : runners.filter {
-            [$0.runner.name, $0.runner.repository, $0.status.title, $0.runner.directory.path]
+            [$0.runner.name, $0.runner.repository, $0.runner.provider.title, $0.status.title, $0.runner.directory.path]
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }
     }
@@ -106,7 +134,7 @@ final class AppModel {
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }.sorted { $0.startedAt > $1.startedAt }
     }
-    var runningCount: Int { runners.filter { $0.status.isRunning }.count }
+    var runningCount: Int { runners.filter { $0.status.isRunning || $0.processID != nil }.count }
     var busyCount: Int { runners.filter { $0.status == .busy }.count }
     var startsAtLoginCount: Int { runners.filter { $0.startsAtLogin && $0.isEnabled }.count }
     var successfulJobs: Int { jobs.filter { $0.outcome == .success }.count }
@@ -137,6 +165,8 @@ final class AppModel {
     func stopMonitoring() {
         pollingTask?.cancel()
         pollingTask = nil
+        workloadTask?.cancel()
+        workloadTask = nil
         if let process = sleepPrevention, process.isRunning { process.terminate() }
         sleepPrevention = nil
     }
@@ -147,8 +177,13 @@ final class AppModel {
         isRefreshing = true
         defer { isRefreshing = false }
         let result = await discovery.discover(additionalDirectories: importedDirectories)
-        let states = await controller.snapshots(for: result.runners)
-        let scan = await logs.scan(runners: result.runners)
+        let states = await controller.snapshots(for: result.runners, allowRemoteActivity: remoteMonitoringEnabled)
+        async let githubScan = logs.scan(runners: result.runners.filter { $0.provider == .github })
+        async let forgejoScan = forgejoLogs.scan(runners: result.runners.filter { $0.provider == .forgejo })
+        let (github, forgejo) = await (githubScan, forgejoScan)
+        let scan = LogScanResult(jobs: github.jobs + forgejo.jobs, events: github.events + forgejo.events,
+                                warnings: github.warnings + forgejo.warnings,
+                                tails: github.tails.merging(forgejo.tails) { _, latest in latest })
         var candidates = Dictionary(jobs.filter { $0.outcome == .running }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for job in scan.jobs { candidates[job.id] = job }
         let reconciled = JobReconciler.reconcile(jobs: Array(candidates.values), snapshots: states)
@@ -160,6 +195,12 @@ final class AppModel {
         let oldStates = Dictionary(uniqueKeysWithValues: runners.map { ($0.id, $0.status) })
         runners = next.sorted { $0.runner.name.localizedStandardCompare($1.runner.name) == .orderedAscending }
         warnings = Array((result.warnings + scan.warnings).map(SecretRedactor.redact).prefix(20))
+        do {
+            try await activitySamples.record(snapshots: runners)
+            var metrics: [String: ObservedRunnerUsage] = [:]
+            for runner in runners { metrics[runner.id] = try await activitySamples.metrics(for: runner.id) }
+            observedUsage = metrics
+        } catch { warnings.append("Activity sampling: " + Self.message(error)) }
         do { jobs = try await history.merge(reconciled) }
         catch { warnings.append(Self.message(error)) }
         logTails = scan.tails
@@ -180,6 +221,39 @@ final class AppModel {
         updateSelectedLog()
         lastUpdated = Date()
         updateSleepPrevention()
+        if remoteMonitoringEnabled && !isRefreshingWorkload {
+            Task { [weak self] in await self?.refreshWorkload() }
+        }
+    }
+
+    func refreshWorkload(force: Bool = false) async {
+        guard remoteMonitoringEnabled, !isRefreshingWorkload, !demoMode else { return }
+        guard force || lastWorkloadAttempt.map({ Date().timeIntervalSince($0) >= 60 }) != false else { return }
+        lastWorkloadAttempt = Date()
+        isRefreshingWorkload = true
+        defer { isRefreshingWorkload = false; workloadTask = nil }
+        let monitor = workloadMonitor
+        let installations = runners.map(\.runner)
+        let request = Task { await monitor.refresh(runners: installations, force: force) }
+        workloadTask = request
+        let report = await request.value
+        guard !Task.isCancelled, !request.isCancelled, remoteMonitoringEnabled else { return }
+        workload = report
+    }
+
+    var visibleWorkloadScopes: [WorkloadScopeSnapshot] {
+        let scopes = workload?.scopes ?? []
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, section == .workload else { return scopes }
+        return scopes.filter { $0.scopeURL.absoluteString.localizedCaseInsensitiveContains(query)
+            || $0.provider.title.localizedCaseInsensitiveContains(query)
+            || $0.jobs.contains { $0.name.localizedCaseInsensitiveContains(query) || $0.repository.localizedCaseInsensitiveContains(query) } }
+    }
+    func workloadScope(for runnerID: String) -> WorkloadScopeSnapshot? {
+        workload?.scopes.first { $0.runnerIDs.contains(runnerID) }
+    }
+    func usage(for runner: InstalledRunner) -> RunnerUsageMetrics {
+        RunnerUsage.calculate(runner: runner, jobs: jobs)
     }
 
     func selectionChanged() { updateSelectedLog() }
@@ -187,24 +261,28 @@ final class AppModel {
     func perform(_ action: RunnerAction, on runner: RunnerSnapshot) {
         guard !busyRunnerIDs.contains(runner.id) else { return }
         if action == .drain {
+            if runner.runner.provider == .forgejo && !remoteMonitoringEnabled && !demoMode {
+                errorMessage = "Enable server monitoring in Workload to verify when this Forgejo runner becomes idle. Stop now is available with an interruption confirmation."
+                return
+            }
             if drainingRunnerIDs.contains(runner.id) {
                 drainingRunnerIDs.remove(runner.id)
                 record(title: "Stop-after-job cancelled", runnerID: runner.id)
             } else {
                 drainingRunnerIDs.insert(runner.id)
                 record(title: "Will stop after the current job", runnerID: runner.id)
-                if runner.status != .busy { runAction(.stop, on: runner) }
+                if runner.status == .idle { runAction(.stop, on: runner) }
             }
             return
         }
         if action == .delete {
             confirmation = RunnerConfirmation(title: "Remove \(runner.runner.name)?",
-                message: "Unregisters this runner from GitHub and removes its login service. Installation files and job history are kept. An active job will be interrupted.",
+                message: "Unregisters this runner from \(runner.runner.provider.title) and removes its login service. Installation files and job history are kept. An active job will be interrupted.",
                 buttonTitle: "Remove runner")
             pendingAction = { [weak self] in self?.runAction(action, on: runner, force: true) }
-        } else if runner.status == .busy && (action == .stop || action == .disable) {
-            confirmation = RunnerConfirmation(title: "Interrupt the active job?",
-                message: "\(runner.runner.name) is building right now. This will stop the runner and interrupt its job. Choose “Stop after this job” to let it finish.",
+        } else if (runner.status == .busy || runner.status == .unknown) && (action == .stop || action == .disable) {
+            confirmation = RunnerConfirmation(title: runner.status == .busy ? "Interrupt the active job?" : "Stop with activity unverified?",
+                message: runner.status == .busy ? "\(runner.runner.name) is building right now. This will stop the runner and interrupt its job. Choose “Stop when idle” to let it finish." : "RunningMan cannot verify whether \(runner.runner.name) has active jobs. Stopping may interrupt work.",
                 buttonTitle: action == .disable ? "Disable and interrupt" : "Stop and interrupt")
             pendingAction = { [weak self] in self?.runAction(action, on: runner, force: true) }
         } else { runAction(action, on: runner) }
@@ -270,16 +348,101 @@ final class AppModel {
     }
 
     func startAll() {
-        for runner in runners where runner.isEnabled && !runner.status.isRunning { perform(.start, on: runner) }
+        for runner in runners where runner.isEnabled && !runner.status.isRunning && runner.processID == nil { perform(.start, on: runner) }
     }
     func stopAllWhenIdle() {
-        for runner in runners where runner.status.isRunning && !drainingRunnerIDs.contains(runner.id) { perform(.drain, on: runner) }
+        for runner in runners where (runner.status.isRunning || runner.processID != nil) && !drainingRunnerIDs.contains(runner.id) { perform(.drain, on: runner) }
     }
 
     func checkGitHub() async {
         if demoMode { githubAccount = "octocat"; return }
         do { githubAccount = try await installer.account() }
         catch { errorMessage = Self.message(error) }
+    }
+
+    func connectForgejo(server: String, token: String) async -> Bool {
+        guard let rawURL = URL(string: server.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            errorMessage = "Enter an HTTPS Forgejo server URL."
+            return false
+        }
+        do {
+            let origin = try ForgejoConnectionStore.origin(for: rawURL)
+            if demoMode { forgejoAccount = "octocat"; return true }
+            if !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try await forgejoConnections.setToken(token, for: origin)
+            }
+            let account = try await forgejoInstaller.account(serverURL: origin)
+            forgejoAccount = account
+            defaultForgejoServer = origin.absoluteString
+            if !forgejoServers.contains(origin) { forgejoServers.append(origin) }
+            UserDefaults.standard.set(forgejoServers.map(\.absoluteString), forKey: "forgejoServers")
+            UserDefaults.standard.set(defaultForgejoServer, forKey: "defaultForgejoServer")
+            lastWorkloadAttempt = nil
+            await workloadMonitor.invalidate()
+            record(title: "Forgejo connected", detail: origin.host, kind: .success)
+            await refreshWorkload(force: true)
+            return true
+        } catch { errorMessage = Self.message(error); return false }
+    }
+
+    func forgetForgejo(_ server: URL) async {
+        if demoMode { forgejoServers.removeAll { $0 == server }; return }
+        do {
+            try await forgejoConnections.removeToken(for: server)
+            forgejoServers.removeAll { $0 == server }
+            UserDefaults.standard.set(forgejoServers.map(\.absoluteString), forKey: "forgejoServers")
+            forgejoAccount = nil
+            workload = nil
+            await workloadMonitor.invalidate()
+        } catch { errorMessage = Self.message(error) }
+    }
+
+    func createForgejoRunner(server: String, scope: ForgejoRunnerScope, scopeName: String,
+                             name: String, labels: String, capacity: Int, startsAtLogin: Bool) async -> Bool {
+        guard !isCreating else { return false }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanName.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"#, options: .regularExpression) != nil else {
+            errorMessage = "Use a runner name of up to 64 letters, numbers, dots, underscores or dashes, beginning with a letter or number."
+            return false
+        }
+        guard let rawURL = URL(string: server.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let origin = try? ForgejoConnectionStore.origin(for: rawURL) else {
+            errorMessage = "Enter an HTTPS Forgejo server URL."
+            return false
+        }
+        isCreating = true
+        creationProgress = "Preparing your Forgejo runner…"
+        defer { isCreating = false }
+        let root = demoMode ? URL(fileURLWithPath: "/Users/demo/Runners", isDirectory: true)
+            : Self.supportDirectory.appendingPathComponent("Runners", isDirectory: true)
+        let directory = root.appendingPathComponent(cleanName, isDirectory: true)
+        let customLabels = labels.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if demoMode {
+            let remote = scopeName.isEmpty ? origin : origin.appendingPathComponent(scopeName)
+            let runner = InstalledRunner(name: cleanName, directory: directory, githubURL: remote,
+                                         labels: customLabels, provider: .forgejo, capacity: capacity)
+            runners.append(RunnerSnapshot(runner: runner, status: .idle, processID: 9100, startsAtLogin: startsAtLogin))
+            selectedRunnerID = runner.id; section = .runners
+            creationProgress = "Demo Forgejo runner created"
+            return true
+        }
+        do {
+            let request = CreateForgejoRunnerRequest(serverURL: origin, scope: scope, scopeName: scopeName,
+                name: cleanName, labels: customLabels, directory: directory,
+                capacity: capacity, startsAtLogin: startsAtLogin, startImmediately: true)
+            let runner = try await forgejoInstaller.create(request) { [weak self] message in
+                Task { @MainActor in self?.creationProgress = SecretRedactor.redact(message) }
+            }
+            record(title: "Forgejo runner created", runnerID: runner.id, detail: runner.name, kind: .success)
+            selectedRunnerID = runner.id; section = .runners
+            lastWorkloadAttempt = nil
+            await refresh()
+            return true
+        } catch {
+            creationProgress = Self.message(error); errorMessage = Self.message(error)
+            record(title: "Forgejo setup failed", detail: Self.message(error), kind: .failure)
+            return false
+        }
     }
 
     func createRunner(githubURL: String, name: String, labels: String, startsAtLogin: Bool) async -> Bool {
@@ -334,7 +497,7 @@ final class AppModel {
         }
         let panel = NSOpenPanel()
         panel.title = "Add an existing runner"
-        panel.message = "Choose the installation folder containing the runner’s .runner file."
+        panel.message = "Choose a configured GitHub runner folder, a RunningMan Forgejo installation, or a Forgejo folder referenced by a user login service."
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = true
@@ -359,12 +522,15 @@ final class AppModel {
     }
 
     func revealRunner(_ runner: InstalledRunner) { NSWorkspace.shared.open(runner.directory) }
-    func openGitHub(_ runner: InstalledRunner) {
-        guard let url = runner.githubURL, url.scheme == "https", url.host == "github.com" else { return }
-        NSWorkspace.shared.open(url)
-    }
+    func openGitHub(_ runner: InstalledRunner) { if let url = runner.remoteURL { openServerLink(url) } }
     func openJob(_ job: RunnerJob) {
-        guard let url = job.runURL, url.scheme == "https", url.host == "github.com" else { return }
+        if let url = job.runURL { openServerLink(url) }
+    }
+    func openServerLink(_ url: URL) {
+        let knownHosts = Set(["github.com"] + runners.compactMap { $0.runner.remoteURL?.host?.lowercased() }
+            + forgejoServers.compactMap { $0.host?.lowercased() })
+        guard url.scheme == "https", url.user == nil, url.password == nil,
+              let host = url.host?.lowercased(), knownHosts.contains(host) else { return }
         NSWorkspace.shared.open(url)
     }
     func clearHistory() {
@@ -490,6 +656,47 @@ final class AppModel {
                 startedAt: started, finishedAt: outcome == .running ? nil : started.addingTimeInterval(Double(95 + index * 17)), outcome: outcome))
         }
         runners[0].currentJob = jobs.first
+        let forgeURL = URL(string: "https://forge.example.com/octocat/NativeBuild")!
+        let forgeRunner = InstalledRunner(name: "forge-macos", directory: URL(fileURLWithPath: "/Users/demo/Runners/forge-macos"),
+            githubURL: forgeURL, agentID: 901, serviceLabel: "runningman.demo.forge.0", version: "13.2.0",
+            labels: ["macos-arm64", "release"], provider: .forgejo, capacity: 2)
+        let docsRunner = InstalledRunner(name: "forge-docs", directory: URL(fileURLWithPath: "/Users/demo/Runners/forge-docs"),
+            githubURL: forgeURL, agentID: 902, serviceLabel: "runningman.demo.forge.1", version: "13.2.0",
+            labels: ["docs"], provider: .forgejo)
+        runners += [RunnerSnapshot(runner: forgeRunner, status: .busy, processID: 9051, startsAtLogin: true),
+                    RunnerSnapshot(runner: docsRunner, status: .idle, processID: 9052, startsAtLogin: true)]
+        forgejoServers = [URL(string: "https://forge.example.com")!]
+        forgejoAccount = "octocat"
+        let now = Date()
+        let ratios = [0.74, 0.42, 0.09, 0.28, 0.02, 0.91, 0.18]
+        for (index, runner) in runners.enumerated() {
+            observedUsage[runner.id] = ObservedRunnerUsage(observedSeconds: 21_600,
+                busySeconds: 21_600 * ratios[index], busyFraction: ratios[index],
+                windowStart: now.addingTimeInterval(-86_400), windowEnd: now)
+        }
+        let githubRunner = runners[0].runner
+        let githubQueue = (0..<3).map { index in
+            WorkloadJob(id: "demo-github-queued-\(index)", name: ["Release app", "Integration tests", "Build preview"][index],
+                repository: githubRunner.repository, workflow: "Release", url: URL(string: "https://github.com/\(githubRunner.repository)/actions"),
+                state: .queued, labels: ["self-hosted", "macOS", "ARM64"],
+                createdAt: now.addingTimeInterval(-Double(720 - index * 180)))
+        }
+        let forgeQueue = (0..<6).map { index in
+            WorkloadJob(id: "demo-forgejo-queued-\(index)", name: index.isMultiple(of: 2) ? "Build macOS app" : "Run native tests",
+                repository: "octocat/NativeBuild", workflow: "Native build", url: forgeURL.appendingPathComponent("actions"),
+                state: .queued, labels: ["macos-arm64"])
+        }
+        workload = WorkloadReport(scopes: [
+            WorkloadScopeSnapshot(scopeURL: githubRunner.remoteURL!, provider: .github, state: .available,
+                message: "Queued jobs can be claimed by any runner with the required labels.", jobs: githubQueue,
+                runnerIDs: [githubRunner.id], runnerLabels: [githubRunner.id: githubRunner.labels], capacity: 1),
+            WorkloadScopeSnapshot(scopeURL: forgeURL, provider: .forgejo, state: .partial,
+                message: "This Forgejo version omits queue timestamps and per-job runner assignment. Running jobs describe the compatible pool; active runner state confirms at least one job.",
+                jobs: forgeQueue + [WorkloadJob(id: "demo-forgejo-running", name: "Publish universal app", repository: "octocat/NativeBuild",
+                    url: forgeURL.appendingPathComponent("actions"), state: .running, labels: ["macos-arm64"])],
+                runnerIDs: [forgeRunner.id, docsRunner.id], runnerLabels: [forgeRunner.id: forgeRunner.labels, docsRunner.id: docsRunner.labels],
+                capacity: 3, remoteBusyRunnerIDs: [forgeRunner.id])
+        ])
         selectedRunnerID = runners.first?.id
         githubAccount = "octocat"
         events = [

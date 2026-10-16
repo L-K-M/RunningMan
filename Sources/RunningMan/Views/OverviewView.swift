@@ -19,7 +19,7 @@ struct OverviewView: View {
                 }
                 HStack(spacing: 12) {
                     metric("Runners running", value: "\(model.runningCount)", footnote: "of \(model.runners.count) installed", icon: "play.circle", color: RunningManStyle.teal)
-                    metric("Working now", value: "\(model.busyCount)", footnote: model.busyCount == 1 ? "job in progress" : "jobs in progress", icon: "bolt.fill", color: .indigo)
+                    metric("Busy runners", value: "\(model.busyCount)", footnote: "with at least one active job", icon: "bolt.fill", color: .indigo)
                     metric("Jobs recorded", value: "\(model.jobs.count)", footnote: "from local runner logs", icon: "clock.arrow.circlepath", color: .purple)
                     metric("Success rate", value: model.successRate.map { "\(Int(($0 * 100).rounded()))%" } ?? "—", footnote: "of completed jobs", icon: "checkmark.seal", color: RunningManStyle.teal)
                 }
@@ -136,6 +136,8 @@ struct RunnerCard: View {
                 }
                 Text(snapshot.runner.name).font(.system(size: 14, weight: .semibold)).lineLimit(1).padding(.top, 12)
                 Text(snapshot.runner.repository).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).padding(.top, 2)
+                Text("\(snapshot.runner.provider.title) · \(snapshot.runner.capacity) \(snapshot.runner.capacity == 1 ? "slot" : "slots")")
+                    .font(.system(size: 9)).foregroundStyle(.secondary).padding(.top, 4)
                 Divider().padding(.vertical, 10)
                 HStack(spacing: 6) {
                     if let job = snapshot.currentJob {

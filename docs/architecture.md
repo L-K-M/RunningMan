@@ -5,7 +5,7 @@ RunningMan has three Swift package targets:
 | Target | Responsibility |
 | --- | --- |
 | RunningManCore | Foundation-only models, bounded installation discovery, incremental diagnostics parsing, history reconciliation and credential redaction. |
-| RunningManServices | Owned subprocess execution, user launchd service management and GitHub runner installation/removal. |
+| RunningManServices | Owned subprocess execution, user launchd service management, GitHub/Forgejo installation and remote workload APIs. |
 | RunningMan | SwiftUI/AppKit windows and menu-bar view, observed application model, user confirmations, activity persistence and diagnostics export. |
 
 ## Discovery and live state
@@ -16,13 +16,15 @@ GitHub's runner metadata can have a UTF-8 byte-order mark. The service marker ca
 
 Every live refresh batches process and launchd observations off the UI actor. Worker processes indicate a busy runner. A listener or loaded service PID indicates a running runner. Failed, truncated or timed-out observations produce uncertain state rather than an assertion that the runner is idle.
 
+Installations carry a GitHub or Forgejo provider. Forgejo's registration and YAML files contain persistent credentials, so discovery never opens them. Managed installations have a bounded, non-secret public descriptor; imported user LaunchAgents can supply executable/configuration paths without reading their contents. Unknown runner registration files are not assumed to be GitHub metadata.
+
 The UI polls every three seconds while automatic refresh, a pending stop-after-job request or keep-awake monitoring needs it. Log reads are incremental and bounded; unchanged logs are not reparsed. Process state is local evidence, separate from GitHub's remote online/offline state.
 
 ## Independent service controls
 
 The service controller validates that a runner's service plist lives in the current user's LaunchAgents directory and points to that runner. It never uses sudo or broad process-name killing.
 
-- Startup edits update RunAtLoad atomically without restarting a live service.
+- Startup edits update RunAtLoad atomically without restarting a live service. Simple imported KeepAlive policies are backed up privately and disabled on disk when login startup is off; restoration checks the service identity and other settings. External edits win, and complex conditions are refused.
 - Start loads and kickstarts only the selected enabled service, without a kill/restart flag.
 - Stop unloads that service without changing its persistent enabled or startup policy.
 - Disable stops the selected runner and persists launchd's disabled override. Enable clears that override without starting it.
@@ -41,11 +43,23 @@ Short-lived runner tokens use ACTIONS_RUNNER_INPUT_TOKEN, which the official run
 
 Partial installations are preserved because remote registration may already have succeeded. Failure messages provide the recovery location.
 
+Forgejo registration uses its modern repository, organization, user or administrator runner API. Its official release assets do not include a native Mac binary, so explicit creation installs the checksummed Homebrew core formula, copies that binary into the owned installation and writes a private per-user service. Node.js for JavaScript actions is a separate host prerequisite. The API token stays in the login Keychain; the runner receives its own connection credential in a private file referenced by its configuration. Discovery and diagnostics do not open either credential file.
+
+Forgejo daemon PIDs establish a live process, not an idle worker. With remote monitoring enabled, bounded, cached server runner status can establish idle or active state. Stop, disable and unregister recheck activity freshly. Without that evidence, activity remains unknown and interruption requires explicit confirmation. A startup checkbox never reloads a live process.
+
+## Workload and utilisation
+
+Remote queue monitoring is off by default and separate from local process polling. GitHub uses the signed-in CLI session; Forgejo uses a Keychain credential bound to one HTTPS origin. Redirects cannot forward authentication to a different origin. Responses, requests, pages and total batch duration are bounded; scope scheduling rotates to avoid starvation, and rate-limit backoff applies across the same server.
+
+Queues are shared compatible pools. GitHub label matching is case insensitive; Forgejo uses exact labels. Unknown labels or unreadable jobs never become a known empty queue. Repositories and organizations are scanned with explicit coverage limits. Forgejo user and administrator scopes use its active queue endpoint, which covers waiting/running jobs but omits dependency/approval-blocked states. Scope identities remain separate even at one origin, while job identities deduplicate overlaps. Missing job timestamps, runner assignment or repository names remain unavailable or use explicit numeric placeholders.
+
+Sampled utilisation is separate from job history. Consecutive known idle/busy observations up to 15 seconds apart contribute monitored time; unknown states, downtime and larger gaps do not. Only intervals busy at both ends receive busy credit. The 24-hour view shows its actual observation coverage and the fraction with at least one active job. This is a conservative estimate, not CPU utilisation or exact occupied slots on a multi-job runner. A private, bounded 48-hour store checkpoints at most every 30 seconds. Local recorded job intervals separately provide completed counts, median durations and capacity-aware recorded busy time.
+
 ## History and diagnostics
 
 The log monitor correlates listener dispatch/completion events and worker job context. Raw job context and private-key blocks are excluded from live tails. Known credential shapes are redacted before presentation or persistence.
 
-History merges retain confirmed completion results and enrich names, repositories and workflow links. Reconciliation only calls a job running when its runner is positively busy and it is that runner's newest unfinished record. Other unfinished records become unknown without fabricated end times. A stale historical record is never allowed to turn an idle runner into a busy one.
+History merges retain confirmed completion results and enrich names, repositories and workflow links. Reconciliation only calls a job running when its runner is positively busy, keeping at most its configured capacity of newest unfinished records. Other unfinished records become unknown without fabricated end times. A stale historical record is never allowed to turn an idle runner into a busy one.
 
 History has a 2,000-job and 6 MiB encoded limit. Activity has a 500-event limit and stable logical identities, so reparsing historical diagnostics after app relaunch does not duplicate activity. Both are private local files written atomically. Clearing saved history does not remove runner diagnostics.
 
@@ -53,6 +67,6 @@ History has a 2,000-job and 6 MiB encoded limit. Activity has a 500-event limit 
 
 Core and service tests use synthetic metadata, diagnostic lines, fake command executors and temporary home directories. They must not start, stop, disable or unregister a real runner.
 
-App-model tests cover busy-job confirmation, demo isolation, in-memory preview creation and activity deduplication across relaunch. Preview screenshots exercise real SwiftUI views with synthetic data. They validate rendering, not a real GitHub release.
+App-model tests cover busy/unknown-job confirmation, demo isolation, in-memory GitHub/Forgejo creation and activity deduplication across relaunch. Core and service fixtures cover credential-free discovery, multi-slot reconciliation, observation gaps, scope/label matching, partial API coverage, request limits, Keychain origin boundaries and fresh interruption guards. Preview screenshots exercise real SwiftUI views with synthetic data, including light/dark workload views. They validate rendering, not a real release or live Forgejo registration.
 
 Real-machine discovery can be inspected read-only. Actual GitHub registration and control of installed runners happen only through an explicit user operation in the app.

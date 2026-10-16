@@ -117,6 +117,9 @@ private struct WindowIdentity: NSViewRepresentable {
             NSApp.appearance = NSAppearance(named: .darkAqua)
             try await Task.sleep(for: .milliseconds(650))
             try capture(name: "overview-dark", directory: directory)
+            model.section = .workload
+            try await Task.sleep(for: .milliseconds(650))
+            try capture(name: "workload-dark", directory: directory)
             NSApp.terminate(nil)
         } catch {
             FileHandle.standardError.write(Data("Snapshot failed: \(error.localizedDescription)\n".utf8))

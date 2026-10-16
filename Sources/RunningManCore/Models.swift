@@ -1,5 +1,10 @@
 import Foundation
 
+public enum RunnerProvider: String, Codable, CaseIterable, Sendable {
+    case github, forgejo
+    public var title: String { self == .github ? "GitHub" : "Forgejo" }
+}
+
 public enum RunnerStatus: String, Codable, CaseIterable, Sendable {
     case idle, busy, stopped, disabled, attention, unknown
     public var title: String {
@@ -24,11 +29,46 @@ public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
     public var serviceLabel: String?
     public var version: String?
     public var labels: [String]
-    public var repository: String { githubURL?.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? "Local runner" }
+    public var provider: RunnerProvider
+    public var executableURL: URL?
+    public var configurationURL: URL?
+    public var diagnosticURLs: [URL]
+    public var capacity: Int
+    /// The existing storage name remains compatible with saved GitHub installations.
+    public var remoteURL: URL? {
+        get { githubURL }
+        set { githubURL = newValue }
+    }
+    public var repository: String {
+        guard let remoteURL else { return "Local runner" }
+        let path = remoteURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return path.isEmpty ? remoteURL.host ?? "Local runner" : path
+    }
     public init(name: String, directory: URL, githubURL: URL? = nil, agentID: Int? = nil,
-                serviceLabel: String? = nil, version: String? = nil, labels: [String] = []) {
+                serviceLabel: String? = nil, version: String? = nil, labels: [String] = [],
+                provider: RunnerProvider = .github, executableURL: URL? = nil,
+                configurationURL: URL? = nil, diagnosticURLs: [URL] = [], capacity: Int = 1) {
         self.name = name; self.directory = directory; self.githubURL = githubURL
         self.agentID = agentID; self.serviceLabel = serviceLabel; self.version = version; self.labels = labels
+        self.provider = provider; self.executableURL = executableURL; self.configurationURL = configurationURL
+        self.diagnosticURLs = diagnosticURLs; self.capacity = max(1, min(capacity, 256))
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, directory, githubURL, agentID, serviceLabel, version, labels
+        case provider, executableURL, configurationURL, diagnosticURLs, capacity
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(name: try values.decode(String.self, forKey: .name), directory: try values.decode(URL.self, forKey: .directory),
+            githubURL: try values.decodeIfPresent(URL.self, forKey: .githubURL), agentID: try values.decodeIfPresent(Int.self, forKey: .agentID),
+            serviceLabel: try values.decodeIfPresent(String.self, forKey: .serviceLabel), version: try values.decodeIfPresent(String.self, forKey: .version),
+            labels: try values.decodeIfPresent([String].self, forKey: .labels) ?? [],
+            provider: try values.decodeIfPresent(RunnerProvider.self, forKey: .provider) ?? .github,
+            executableURL: try values.decodeIfPresent(URL.self, forKey: .executableURL),
+            configurationURL: try values.decodeIfPresent(URL.self, forKey: .configurationURL),
+            diagnosticURLs: try values.decodeIfPresent([URL].self, forKey: .diagnosticURLs) ?? [],
+            capacity: try values.decodeIfPresent(Int.self, forKey: .capacity) ?? 1)
     }
 }
 

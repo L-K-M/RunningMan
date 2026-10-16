@@ -63,7 +63,7 @@ struct RunnersView: View {
                         .frame(width: 33, height: 33).background(snapshot.status.color.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                     VStack(alignment: .leading, spacing: 4) {
                         Text(snapshot.runner.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                        Text(snapshot.runner.repository).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                        Text("\(snapshot.runner.provider.title) · \(snapshot.runner.repository)").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength: 0)
                     if model.busyRunnerIDs.contains(snapshot.id) { ProgressView().controlSize(.mini) }
@@ -109,6 +109,8 @@ struct RunnerDetailView: View {
                             Image(systemName: "terminal.fill").foregroundStyle(snapshot.status.color)
                             Text(runner.name).font(.system(size: 23, weight: .bold, design: .rounded)).lineLimit(1)
                         }
+                        Text(runner.provider.title + (runner.remoteURL?.host.map { " · " + $0 } ?? ""))
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
                         Button { model.openGitHub(runner) } label: {
                             Label(runner.repository, systemImage: "arrow.up.right.square").font(.system(size: 11))
                         }.buttonStyle(.link).disabled(runner.githubURL == nil)
@@ -124,7 +126,7 @@ struct RunnerDetailView: View {
                     }
                     Spacer()
                     if isActing { ProgressView().controlSize(.small) }
-                    if snapshot.status.isRunning {
+                    if snapshot.status.isRunning || snapshot.processID != nil {
                         Button("Stop", systemImage: "stop.fill") { model.perform(.stop, on: snapshot) }
                             .controlSize(.small).disabled(isActing)
                     } else {
@@ -192,7 +194,17 @@ struct RunnerDetailView: View {
                     }.toggleStyle(.switch).controlSize(.small).disabled(isActing)
                 }
                 Surface {
+                    SectionHeading(title: "Workload", subtitle: "Compatible queue and recent usage") {
+                        Button("View fleet") { model.section = .workload }.buttonStyle(.link).font(.system(size: 11))
+                    }.padding(.bottom, 4)
+                    RunnerWorkloadRow(snapshot: snapshot)
+                }
+                Surface {
                     Text("Installation").font(.system(size: 13, weight: .semibold)).padding(.bottom, 13)
+                    detailRow("Platform", value: runner.provider.title)
+                    Divider().padding(.vertical, 9)
+                    detailRow("Job slots", value: String(runner.capacity))
+                    Divider().padding(.vertical, 9)
                     detailRow("Version", value: runner.version.map { "v\($0)" } ?? "Not reported")
                     Divider().padding(.vertical, 9)
                     detailRow("Process ID", value: snapshot.processID.map(String.init) ?? "Not running")

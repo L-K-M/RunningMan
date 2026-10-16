@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import RunningManCore
+import RunningManServices
 @testable import RunningMan
 
 final class AppModelTests: XCTestCase {
@@ -49,6 +50,36 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.runners.count, initial + 1)
         XCTAssertEqual(model.selectedRunner?.runner.name, "test-runner")
         XCTAssertEqual(model.selectedRunner?.startsAtLogin, false)
+    }
+
+    @MainActor func testDemoForgejoCreationUsesNativeProviderAndRequestedCapacity() async {
+        let model = AppModel(demoMode: true)
+        let count = model.runners.count
+        let created = await model.createForgejoRunner(server: "https://forge.example.com", scope: .repository,
+            scopeName: "example/weather", name: "forge-test", labels: "macos-arm64:host", capacity: 3, startsAtLogin: false)
+        XCTAssertTrue(created)
+        XCTAssertEqual(model.runners.count, count + 1)
+        XCTAssertEqual(model.selectedRunner?.runner.provider, .forgejo)
+        XCTAssertEqual(model.selectedRunner?.runner.capacity, 3)
+        XCTAssertEqual(model.selectedRunner?.startsAtLogin, false)
+        XCTAssertEqual(model.selectedRunner?.runner.directory.path, "/Users/demo/Runners/forge-test")
+    }
+
+    @MainActor func testUnknownActivityRequiresExplicitStopAndDrainDoesNotInterrupt() {
+        let model = AppModel(demoMode: true)
+        var runner = model.runners[0]
+        runner.status = .unknown
+        runner.processID = 9001
+        model.runners[0] = runner
+        model.perform(.drain, on: runner)
+        XCTAssertTrue(model.drainingRunnerIDs.contains(runner.id))
+        XCTAssertEqual(model.runners[0].status, .unknown)
+        XCTAssertNil(model.confirmation)
+        model.perform(.stop, on: runner)
+        XCTAssertNotNil(model.confirmation)
+        XCTAssertEqual(model.runners[0].status, .unknown)
+        model.cancelPendingAction()
+        XCTAssertEqual(model.runners[0].status, .unknown)
     }
 
     func testHistoricalActivityDeduplicatesAcrossRelaunchAndDatePrecision() async throws {

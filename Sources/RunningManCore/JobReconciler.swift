@@ -4,16 +4,18 @@ import Foundation
 /// Missing completion records stay undated and unknown; the app never invents a result.
 public enum JobReconciler {
     public static func reconcile(jobs: [RunnerJob], snapshots: [RunnerSnapshot]) -> [RunnerJob] {
-        let busy = Set(snapshots.filter { $0.status == .busy }.map(\.id))
-        var newest: [String: RunnerJob] = [:]
-        for job in jobs where job.finishedAt == nil {
-            if let existing = newest[job.runnerID],
-               existing.startedAt > job.startedAt || (existing.startedAt == job.startedAt && existing.id > job.id) { continue }
-            newest[job.runnerID] = job
+        let capacity = Dictionary(snapshots.filter { $0.status == .busy }.map { ($0.id, max(1, $0.runner.capacity)) }, uniquingKeysWith: max)
+        let unfinished = Dictionary(grouping: jobs.filter { $0.finishedAt == nil }, by: \.runnerID)
+        var liveIDs = Set<String>()
+        for (runnerID, slots) in capacity {
+            let latest = (unfinished[runnerID] ?? []).sorted {
+                $0.startedAt == $1.startedAt ? $0.id > $1.id : $0.startedAt > $1.startedAt
+            }.prefix(slots)
+            liveIDs.formUnion(latest.map(\.id))
         }
         return jobs.map { job in
             guard job.outcome == .running, job.finishedAt == nil else { return job }
-            guard busy.contains(job.runnerID), newest[job.runnerID]?.id == job.id else {
+            guard liveIDs.contains(job.id) else {
                 var unknown = job
                 unknown.outcome = .unknown
                 return unknown

@@ -145,7 +145,7 @@ struct RunnerActionsMenu: View {
     @Environment(AppModel.self) private var model
     let snapshot: RunnerSnapshot
     var body: some View {
-        if snapshot.status.isRunning {
+        if snapshot.status.isRunning || snapshot.processID != nil {
             Button(model.drainingRunnerIDs.contains(snapshot.id) ? "Cancel stop when idle" : "Stop when idle", systemImage: "moon.zzz") { model.perform(.drain, on: snapshot) }
                 .help("Stop after this job finishes. Keep RunningMan open until the runner stops.")
             Button("Stop runner", systemImage: "stop.fill") { model.perform(.stop, on: snapshot) }
@@ -162,7 +162,7 @@ struct RunnerActionsMenu: View {
         }
         Divider()
         Button("Show in Finder", systemImage: "folder") { model.revealRunner(snapshot.runner) }
-        Button("Open on GitHub", systemImage: "arrow.up.right.square") { model.openGitHub(snapshot.runner) }
+        Button("Open on \(snapshot.runner.provider.title)", systemImage: "arrow.up.right.square") { model.openGitHub(snapshot.runner) }
             .disabled(snapshot.runner.githubURL == nil)
         Divider()
         Button("Delete runner…", systemImage: "trash", role: .destructive) { model.perform(.delete, on: snapshot) }
@@ -211,7 +211,7 @@ struct JobRow: View {
             }
             if job.runURL != nil {
                 Button { model.openJob(job) } label: { Image(systemName: "arrow.up.right") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Open this run on GitHub")
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Open this run on its server")
             }
         }.padding(.vertical, 12)
     }

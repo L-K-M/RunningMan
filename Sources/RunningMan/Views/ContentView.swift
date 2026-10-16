@@ -18,6 +18,7 @@ struct ContentView: View {
                     switch model.section {
                     case .overview: OverviewView()
                     case .runners: RunnersView()
+                    case .workload: WorkloadView()
                     case .history: HistoryView()
                     }
                 }
@@ -41,14 +42,16 @@ struct ContentView: View {
                         Button("Stop all when idle", systemImage: "moon.zzz") { model.stopAllWhenIdle() }
                     } label: { Image(systemName: "ellipsis.circle") }.help("Fleet actions")
                     Button { model.showingNewRunner = true } label: { Label("New runner", systemImage: "plus") }
-                        .keyboardShortcut("n").help("Register a new GitHub runner (⌘N)")
+                        .keyboardShortcut("n").help("Register a new GitHub or Forgejo runner (⌘N)")
                 }
             }
-            .searchable(text: $model.searchText, placement: .toolbar, prompt: model.section == .history ? "Search job history" : "Find a runner")
+            .searchable(text: $model.searchText, placement: .toolbar,
+                        prompt: model.section == .history ? "Search job history" : model.section == .workload ? "Search queues or scopes" : "Find a runner")
         }
         .tint(RunningManStyle.accent)
         .frame(minWidth: 1000, minHeight: 650)
         .sheet(isPresented: $model.showingNewRunner) { NewRunnerSheet().environment(model) }
+        .sheet(isPresented: $model.showingForgejoConnection) { ForgejoConnectionSheet().environment(model) }
         .onChange(of: model.selectedRunnerID) { _, _ in model.selectionChanged() }
         .alert("RunningMan", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }

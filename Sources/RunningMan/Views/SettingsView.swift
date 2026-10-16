@@ -28,6 +28,21 @@ struct SettingsView: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             } header: { Text("GitHub") }
             Section {
+                Toggle("Read server queues automatically", isOn: $model.remoteMonitoringEnabled)
+                Text("Reads compatible queued and active jobs about once a minute while monitoring. GitHub uses your CLI sign-in; Forgejo uses a token stored in Keychain. Coverage depends on server APIs, labels and repository access.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Button("Connect a Forgejo server…", systemImage: "network") { model.showingForgejoConnection = true }
+                ForEach(model.forgejoServers, id: \.absoluteString) { server in
+                    HStack {
+                        Text(server.host ?? server.absoluteString).font(.system(size: 11))
+                        Spacer()
+                        Button("Forget connection") { Task { await model.forgetForgejo(server) } }.controlSize(.small)
+                    }
+                }
+                Text("Forgetting a connection removes RunningMan’s API token. Registered runners keep their own connection and continue running.")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            } header: { Text("Queues & Forgejo") }
+            Section {
                 LabeledContent("Installed runners", value: "\(model.runners.count)")
                 LabeledContent("Start at login", value: "\(model.startsAtLoginCount) runners")
                 Text("Set automatic startup separately for each runner in its Overview. Services start when you log in to this macOS account, after startup or restart.")

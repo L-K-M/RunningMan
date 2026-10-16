@@ -46,7 +46,9 @@ final class RunningManCoreTests: XCTestCase {
         let deep = temporary.appendingPathComponent("Documents/deep/hidden-runner")
         let metadata = "{\"agentName\":\"external\",\"gitHubUrl\":\"https://github.com/example/desktop\"}"
         try write(metadata, to: external.appendingPathComponent(".runner"))
+        try write("", to: external.appendingPathComponent("bin/Runner.Listener"))
         try write(metadata, to: deep.appendingPathComponent(".runner"))
+        try write("", to: deep.appendingPathComponent("bin/Runner.Listener"))
         let plist = temporary.appendingPathComponent("Library/LaunchAgents/actions.runner.example.external.plist")
         let properties: [String: Any] = ["Label": "actions.runner.example.external", "ProgramArguments": [external.appendingPathComponent("runsvc.sh").path]]
         try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -57,7 +59,9 @@ final class RunningManCoreTests: XCTestCase {
 
     func testMalformedRunnerProducesWarningAndDoesNotAbortOthers() async throws {
         try write("not json", to: temporary.appendingPathComponent("bad/.runner"))
+        try write("", to: temporary.appendingPathComponent("bad/bin/Runner.Listener"))
         try write("{\"agentName\":\"valid\"}", to: temporary.appendingPathComponent("valid/.runner"))
+        try write("", to: temporary.appendingPathComponent("valid/bin/Runner.Listener"))
         let result = await RunnerDiscovery(homeDirectory: temporary).discover()
         XCTAssertEqual(result.runners.map(\.name), ["valid"])
         XCTAssertEqual(result.warnings.count, 1)

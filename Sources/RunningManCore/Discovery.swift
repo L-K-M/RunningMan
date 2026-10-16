@@ -28,12 +28,17 @@ public actor RunnerDiscovery {
         }
         let agents = homeDirectory.appendingPathComponent("Library/LaunchAgents")
         var labels: [URL: String] = [:]
+        var forgejoServices: [URL: InstalledRunner] = [:]
         if let files = try? fileManager.contentsOfDirectory(at: agents,
             includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
             for file in files.filter({ $0.pathExtension == "plist" }).prefix(512) {
-                guard let plist = Self.plist(at: file),
-                      let label = plist["Label"] as? String,
-                      label.hasPrefix("actions.runner.") else { continue }
+                guard let plist = Self.plist(at: file), let label = plist["Label"] as? String else { continue }
+                if let forgejo = Self.forgejoService(plist) {
+                    candidates.insert(forgejo.directory)
+                    forgejoServices[forgejo.directory] = forgejo
+                    continue
+                }
+                guard label.hasPrefix("actions.runner.") else { continue }
                 if let working = plist["WorkingDirectory"] as? String, working.hasPrefix("/") {
                     let directory = URL(fileURLWithPath: working).standardizedFileURL
                     candidates.insert(directory); labels[directory] = label
@@ -53,10 +58,36 @@ public actor RunnerDiscovery {
         var runners: [InstalledRunner] = []
         var resolved = Set<String>()
         for directory in candidates.sorted(by: { $0.path < $1.path }) {
-            let metadataURL = directory.appendingPathComponent(".runner")
-            guard fileManager.fileExists(atPath: metadataURL.path) else { continue }
             let canonical = directory.resolvingSymlinksInPath().standardizedFileURL
-            guard resolved.insert(canonical.path).inserted else { continue }
+            guard !resolved.contains(canonical.path) else { continue }
+            let descriptorURL = canonical.appendingPathComponent(RunnerInstallationDescriptor.fileName)
+            if fileManager.fileExists(atPath: descriptorURL.path) {
+                do {
+                    let descriptor = try RunnerInstallationDescriptor.load(from: canonical)
+                    runners.append(try descriptor.installedRunner(in: canonical))
+                    resolved.insert(canonical.path)
+                } catch {
+                    warnings.append("Could not read public runner metadata in \(directory.lastPathComponent): \(error.localizedDescription)")
+                }
+                continue
+            }
+            if let service = forgejoServices[canonical] ?? forgejoServices[directory] {
+                runners.append(service); resolved.insert(canonical.path); continue
+            }
+            // Forgejo's .runner contains persistent credentials. Classify native
+            // installations before ever considering the GitHub metadata format.
+            let forgejoExecutables = [canonical.appendingPathComponent("forgejo-runner"), canonical.appendingPathComponent("bin/forgejo-runner")]
+            if forgejoExecutables.contains(where: { fileManager.fileExists(atPath: $0.path) }) {
+                // A binary alone is not a registration. In particular, removal
+                // preserves its files after retiring the public descriptor.
+                continue
+            }
+            guard fileManager.fileExists(atPath: canonical.appendingPathComponent("bin/Runner.Listener").path)
+                    || fileManager.fileExists(atPath: canonical.appendingPathComponent("bin/Runner.Listener.deps.json").path)
+                    || fileManager.fileExists(atPath: canonical.appendingPathComponent("config.sh").path) else { continue }
+            let metadataURL = canonical.appendingPathComponent(".runner")
+            guard fileManager.fileExists(atPath: metadataURL.path) else { continue }
+            resolved.insert(canonical.path)
             do {
                 let data = try Self.smallData(at: metadataURL, limit: 128 * 1024)
                 let json = try JSONSerialization.jsonObject(with: Self.removingBOM(data))
@@ -94,6 +125,27 @@ public actor RunnerDiscovery {
             }
         }
         return DiscoveryResult(runners: runners.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }, warnings: warnings)
+    }
+
+    private static func forgejoService(_ plist: [String: Any]) -> InstalledRunner? {
+        guard let label = plist["Label"] as? String,
+              let arguments = plist["ProgramArguments"] as? [String], let first = arguments.first,
+              first.hasPrefix("/"), let configPath = ForgejoDaemonCommand.parse(arguments: arguments) else { return nil }
+        let executable = URL(fileURLWithPath: first).standardizedFileURL
+        let name = executable.lastPathComponent.lowercased()
+        guard name == "forgejo-runner" || name.range(of: #"^forgejo-runner[-_.][a-z0-9.-]+$"#, options: .regularExpression) != nil else { return nil }
+        let working = (plist["WorkingDirectory"] as? String).flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : nil }
+        let config: URL?
+        if configPath.hasPrefix("/") { config = URL(fileURLWithPath: configPath).standardizedFileURL }
+        else { config = working?.appendingPathComponent(configPath).standardizedFileURL }
+        let directory = (working ?? config?.deletingLastPathComponent() ?? executable.deletingLastPathComponent()).resolvingSymlinksInPath().standardizedFileURL
+        let diagnosticURLs = ["StandardOutPath", "StandardErrorPath"].compactMap { plist[$0] as? String }.compactMap { value -> URL? in
+            guard value.hasPrefix("/"), URL(fileURLWithPath: value).pathExtension.lowercased() == "log" else { return nil }
+            return URL(fileURLWithPath: value).standardizedFileURL
+        }
+        return InstalledRunner(name: directory.lastPathComponent, directory: directory,
+            serviceLabel: label, provider: .forgejo, executableURL: executable,
+            configurationURL: config, diagnosticURLs: Array(Set(diagnosticURLs)))
     }
 
     private static func installedVersion(at directory: URL) -> String? {

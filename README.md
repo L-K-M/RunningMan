@@ -1,6 +1,6 @@
 # RunningMan
 
-A native macOS home for your self-hosted GitHub Actions runners.
+A native macOS home for your self-hosted GitHub Actions and Forgejo runners.
 
 See what is installed, what is working, what ran, and what will start when you log in. RunningMan discovers existing installations in place and keeps their configuration and workspaces where they are.
 
@@ -11,6 +11,7 @@ The preview above uses fictional runners and jobs.
 ## A little mission control for your Mac
 
 - **Live fleet overview.** Running, busy, stopped and disabled runners, with job counts, success rate and recent activity.
+- **Queues and utilisation.** Compatible queued jobs, server-reported wait times, job slots and sampled busy rates, with explicit coverage and availability.
 - **Independent controls.** Start and stop now, enable or disable a runner, and choose whether it starts at login.
 - **Finish the job first.** Stop a busy runner after its current job finishes; cancel that request any time. RunningMan must remain open until it stops the runner.
 - **Create and remove.** Register a repository or organization runner from its GitHub URL, download and verify the official runner, and install its user service. Unregister existing runners without deleting their workspaces.
@@ -87,6 +88,30 @@ Registering a runner does not rewrite repository workflows. Use the runner's lab
 runs-on: [self-hosted, macOS]
 ~~~
 
+## Forgejo runners
+
+Choose **New Runner → Forgejo**, enter your HTTPS server URL, and connect with a Forgejo access token. The token is saved in your login Keychain. Repository, organization, personal-account and instance registration scopes are supported; the token needs runner-management permission for the selected scope. Forgejo 15 or later and Forgejo Runner 13.2 or later are required for this setup flow.
+
+RunningMan installs the checksummed Homebrew core `forgejo-runner` package when needed and copies its native binary into the new runner directory. It uses its own user LaunchAgent rather than starting a global Homebrew service. Install Homebrew first. JavaScript workflow actions also need a compatible Node.js installation on the Mac; the runner package does not bundle it.
+
+Native Mac labels use the `:host` suffix, such as `macos-arm64:host`; use `macos-arm64` in the workflow's `runs-on`. Capacity is the maximum number of concurrent jobs. Start with one for Xcode builds unless the Mac has enough resources for more.
+
+Discovery reads RunningMan's public descriptor and user LaunchAgent metadata. It never opens Forgejo's credential-bearing `.runner` or YAML configuration files. Existing installations referenced by an owned user login service can be discovered and controlled in place; importing an arbitrary folder alone cannot safely recover private registration metadata. Removing a runner from Forgejo requires its numeric registration ID, scope and API access.
+
+For Homebrew services, the login checkbox also handles simple KeepAlive policies. RunningMan preserves the original policy in a private backup and restores it only if the service has not otherwise changed. Complex startup conditions are reported for manual configuration.
+
+## Queues and usage
+
+Open **Workload** and enable server monitoring. It is off by default. GitHub uses the existing GitHub CLI sign-in; **Connect Forgejo** saves an origin-specific API token in Keychain. Reads happen about once a minute, with request limits, timeouts and rate-limit backoff. Local process monitoring continues separately.
+
+![Workload preview with fictional GitHub and Forgejo queues](docs/images/workload.png)
+
+Queue counts include jobs whose labels match known local runners. A job belongs to a compatible pool, so several machines may be able to claim it. Counts are deduplicated when the same job is visible through several scopes; they are not added once per compatible runner. The busiest visible queues appear first.
+
+Repository and organization scans are bounded and disclose partial access or inspection limits. Forgejo account and instance scopes use its active-runner queue API; that API omits jobs blocked on dependencies or approvals. Unknown or unsupported data shows **Unavailable** or **—**, rather than an empty queue. Some Forgejo versions omit per-job runner assignment and timestamps: exact occupied slots and queue age cannot be reconstructed from those responses. GitHub queue age is shown only when the job itself reports a creation timestamp.
+
+**Busy while observed** is an estimate from consecutive known idle/busy samples while RunningMan is monitoring. It shows the covered time explicitly; app downtime, uncertain activity and gaps over 15 seconds are excluded. It measures whether at least one job was active, not CPU load or the percentage of occupied slots on a multi-job runner. Up to 48 hours of bounded observations are stored privately; the view covers the last 24 hours. Recorded-job counts and median durations come separately from available local job history, which can be incomplete for Forgejo.
+
 ## History and privacy
 
 History is recovered from available local Runner and Worker diagnostics, then saved in **~/Library/Application Support/RunningMan/**. It is not a complete GitHub audit log. Rotated or deleted diagnostics cannot recover jobs that RunningMan has never seen.
@@ -105,7 +130,7 @@ scripts/smoke-test.sh
 
 `scripts/build.sh` also accepts `--universal`, `--zip`, `--run`, `--install` (replaces `/Applications/RunningMan.app`) and `--clean`. To cut a release, run `scripts/release.sh 1.2.0` on a clean, pushed `main` (`--dry-run` checks first): it updates the marked download link above, commits, tags `v1.2.0` and pushes both, after which the release workflow builds and publishes the zip and announces it to installed apps.
 
-The smoke test opens a clearly labelled synthetic preview workspace and saves four screenshots under **.local/screenshots/**. It never controls installed runners. You can explore that preview manually:
+The smoke test opens a clearly labelled synthetic preview workspace and saves six screenshots under **.local/screenshots/**, including light/dark workload views. It never controls installed runners. You can explore that preview manually:
 
 ~~~sh
 open -na dist/RunningMan.app --args --demo
