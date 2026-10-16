@@ -97,10 +97,14 @@ private struct WindowIdentity: NSViewRepresentable {
 }
 
 @MainActor private enum SnapshotCapture {
+    /// scripts/smoke-test.sh sets this. The directory deliberately stays out of
+    /// the command line: at launch, a bare argument that does not follow a
+    /// `-key` stops SwiftUI from opening the main window. In
+    /// `--demo --snapshot-dir <dir>`, `--demo` took `--snapshot-dir` as its
+    /// value, the path was left bare, and the capture never started.
     static var destination: URL? {
-        let arguments = CommandLine.arguments
-        guard let index = arguments.firstIndex(of: "--snapshot-dir"), index + 1 < arguments.count else { return nil }
-        return URL(fileURLWithPath: arguments[index + 1], isDirectory: true)
+        guard let path = ProcessInfo.processInfo.environment["RUNNINGMAN_SNAPSHOT_DIR"], !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
     }
     static func run(model: AppModel, directory: URL) async {
         do {
