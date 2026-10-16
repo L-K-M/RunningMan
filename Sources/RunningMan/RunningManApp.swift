@@ -4,15 +4,17 @@ import SwiftUI
 @main
 struct RunningManApp: App {
     @State private var model = AppModel()
+    @State private var updates = AppUpdateChecker()
     @NSApplicationDelegateAdaptor(RunningManAppDelegate.self) private var delegate
 
     var body: some Scene {
         Window("RunningMan", id: "main") {
-            MainWindowScene().environment(model)
+            MainWindowScene(updates: updates).environment(model)
                 .onAppear { delegate.model = model }
         }
         .defaultSize(width: 1280, height: 820)
         .commands {
+            AppUpdateCommands(updates: updates)
             CommandGroup(replacing: .newItem) {
                 Button("New Runner…") { model.showingNewRunner = true }.keyboardShortcut("n")
                 Button("Import Existing Runner…") { model.importRunner() }.keyboardShortcut("o")
@@ -34,7 +36,7 @@ struct RunningManApp: App {
                 }
             }
         }
-        Settings { SettingsView().environment(model) }
+        Settings { SettingsView().environment(model).environment(updates) }
         MenuBarExtra {
             RunnerMenuView().environment(model)
         } label: {
@@ -51,9 +53,11 @@ struct RunningManApp: App {
 private struct MainWindowScene: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
+    let updates: AppUpdateChecker
     @State private var snapshotTaskStarted = false
     var body: some View {
         ContentView()
+            .environment(updates)
             .background(WindowIdentity())
             .onAppear {
                 let action = openWindow
@@ -63,6 +67,10 @@ private struct MainWindowScene: View {
                     NSApp.windows.first { $0.identifier?.rawValue == "RunningManMain" }?.makeKeyAndOrderFront(nil)
                 }
                 model.startMonitoring()
+                // Demo data and snapshot captures stay offline and banner-free.
+                if SnapshotCapture.destination == nil, !model.demoMode {
+                    updates.startAutomatic()
+                }
                 if !snapshotTaskStarted, let directory = SnapshotCapture.destination {
                     snapshotTaskStarted = true
                     Task { await SnapshotCapture.run(model: model, directory: directory) }

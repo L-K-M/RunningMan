@@ -1,0 +1,151 @@
+name: Release
+
+# A pushed v* tag (scripts/release.sh) or a published GitHub release builds the
+# universal app and attaches RunningMan-v<version>.zip plus its SHA-256; when
+# only the tag exists, the release is created first. A second job then
+# announces the release in the public update manifest (runningman/latest.json
+# in ajila-tg-app-updates) that installed apps check once a day; it never moves
+# backwards and skips non-vX.Y.Z tags, drafts and prereleases. Rerun for an
+# existing release with "Run workflow" and its tag.
+
+"on":
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of an existing release to build and attach the app to
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  app:
+    name: Build and attach RunningMan.app
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Tag is a version tag
+        if: github.event_name == 'push'
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::tag $TAG is not a v1.2.3-style version tag (cut releases with scripts/release.sh)"; exit 1 ;;
+          esac
+
+      - name: Annotated tag on main
+        if: github.event_name == 'push'
+        run: |
+          if [ "$(git cat-file -t "$GITHUB_REF")" != 'tag' ]; then
+            echo "::error::$GITHUB_REF must be an annotated tag"; exit 1
+          fi
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::release commit is not on main"; exit 1
+          fi
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build universal app
+        run: RUNNINGMAN_VERSION="${TAG#v}" scripts/build-app.sh --universal --zip
+
+      - name: Check bundle
+        run: |
+          app="dist/RunningMan.app"
+          plutil -lint "$app/Contents/Info.plist"
+          test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "${TAG#v}"
+          lipo -verify_arch arm64 "$app/Contents/MacOS/RunningMan"
+          lipo -verify_arch x86_64 "$app/Contents/MacOS/RunningMan"
+          test -s "$app/Contents/Resources/AppIcon.icns"
+          codesign --verify --strict "$app"
+
+      - name: Render isolated preview
+        run: scripts/smoke-test.sh
+
+      - name: Create the release if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+          else
+            {
+              echo "Universal build (Apple silicon and Intel), macOS 14 or later, ad-hoc signed."
+              echo "First launch is not notarized: open once, click Done, then System Settings → Privacy & Security → Open Anyway (Control-click → Open on macOS 14)."
+              echo
+              echo 'To update: quit RunningMan, replace the app in Applications, then run `xattr -dr com.apple.quarantine "/Applications/RunningMan.app"` or use Open Anyway again. Runner configuration and saved history are kept.'
+              echo
+              echo "SHA-256 checksums are attached as .sha256 files."
+            } > notes.md
+            gh release create "$TAG" --verify-tag --title "RunningMan ${TAG#v}" \
+              --notes-file notes.md --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Zip and attach the app to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="RunningMan-$(printf '%s' "$TAG" | tr -c 'A-Za-z0-9._-' '-').zip"
+          mv dist/RunningMan.zip "$RUNNER_TEMP/$name"
+          (cd "$RUNNER_TEMP" && shasum -a 256 "$name" > "$name.sha256")
+          gh release upload "$TAG" "$RUNNER_TEMP/$name" "$RUNNER_TEMP/$name.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+
+  publish-update-manifest:
+    name: Publish update manifest
+    # Only after the release exists with every asset attached.
+    needs: app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # github.token only reads this repository's release; the push uses the secret.
+      contents: read
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+      HAS_TOKEN: ${{ (secrets.APP_UPDATES_TOKEN || secrets.ACCESS_TOKEN) != '' }}
+    steps:
+      - name: Check the publishing token
+        if: env.HAS_TOKEN != 'true'
+        run: |
+          echo "::error::Neither APP_UPDATES_TOKEN nor the org secret ACCESS_TOKEN is available; cannot publish the update manifest."
+          exit 1
+
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Check out the update manifests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ajilach/ajila-tg-app-updates
+          ref: main
+          path: .app-updates
+          token: ${{ secrets.APP_UPDATES_TOKEN || secrets.ACCESS_TOKEN }}
+
+      - name: Publish runningman/latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish-update-manifest.sh .app-updates runningman "$TAG"

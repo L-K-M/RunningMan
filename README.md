@@ -21,6 +21,14 @@ The preview above uses fictional runners and jobs.
 
 RunningMan is an independent personal project. It uses SwiftUI and AppKit, with no third-party dependencies.
 
+## Download
+
+Requires macOS 14 or later.
+
+<!-- latest-release -->[RunningMan-v0.1.0.zip](https://github.com/L-K-M/RunningMan/releases/download/v0.1.0/RunningMan-v0.1.0.zip)<!-- /latest-release --> (or an older one from the [releases](https://github.com/L-K-M/RunningMan/releases) list), unzip, and copy **RunningMan.app** to Applications. The build is ad-hoc signed, not notarized: open it once, click Done, then System Settings → Privacy & Security → Open Anyway (Control-click → Open on macOS 14).
+
+Once installed, RunningMan checks a small public manifest file once a day and shows a banner when a newer release exists. Turn it off in Settings → Updates.
+
 ## Build and open
 
 Requires macOS 14 or later and Xcode 16 or later with its command-line tools selected.
@@ -90,10 +98,12 @@ Registration credentials are never read. Common credential formats and explicit 
 ## Development
 
 ~~~sh
-swift test
-scripts/build-app.sh --debug
+scripts/build.sh            # swift test + release app build
+scripts/build.sh --debug    # or a debug build
 scripts/smoke-test.sh
 ~~~
+
+`scripts/build.sh` also accepts `--universal`, `--zip`, `--run`, `--install` (replaces `/Applications/RunningMan.app`) and `--clean`. To cut a release, run `scripts/release.sh 1.2.0` on a clean, pushed `main` (`--dry-run` checks first): it updates the marked download link above, commits, tags `v1.2.0` and pushes both, after which the release workflow builds and publishes the zip and announces it to installed apps.
 
 The smoke test opens a clearly labelled synthetic preview workspace and saves four screenshots under **.local/screenshots/**. It never controls installed runners. You can explore that preview manually:
 

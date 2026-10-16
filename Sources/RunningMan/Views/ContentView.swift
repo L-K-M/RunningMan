@@ -3,18 +3,25 @@ import RunningManCore
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    @Environment(AppUpdateChecker.self) private var updates
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
             sidebar
                 .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 250)
         } detail: {
-            Group {
-                switch model.section {
-                case .overview: OverviewView()
-                case .runners: RunnersView()
-                case .history: HistoryView()
+            VStack(spacing: 0) {
+                if updates.showsBanner, let release = updates.available {
+                    AppUpdateBanner(updates: updates, release: release)
                 }
+                Group {
+                    switch model.section {
+                    case .overview: OverviewView()
+                    case .runners: RunnersView()
+                    case .history: HistoryView()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .background(RunningManStyle.canvas)
             .navigationTitle(model.section.title)

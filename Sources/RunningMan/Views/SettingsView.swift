@@ -4,6 +4,8 @@ import RunningManCore
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(AppUpdateChecker.self) private var updates
+    @AppStorage(AppUpdateChecker.automaticKey) private var checkAutomatically = true
     var body: some View {
         @Bindable var model = model
         Form {
@@ -43,6 +45,19 @@ struct SettingsView: View {
                         .disabled(model.jobs.isEmpty)
                 }
             } header: { Text("History & diagnostics") }
+            Section {
+                Toggle("Check for updates automatically", isOn: $checkAutomatically)
+                Text("Checks once a day by downloading a small public file from GitHub. Nothing else is sent.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack {
+                    Button(updates.checking ? "Checking…" : "Check Now") { updates.checkNow() }
+                        .disabled(updates.checking)
+                    if let last = updates.lastCheck {
+                        Text("Last checked \(last.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                }
+            } header: { Text("Updates") }
             Section {
                 HStack(spacing: 12) {
                     Image(systemName: "figure.run.circle.fill").font(.system(size: 32)).foregroundStyle(.indigo)
