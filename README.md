@@ -42,6 +42,8 @@ open dist/RunningMan.app
 
 The build creates an ad-hoc signed app, a ZIP and its SHA-256 checksum in **dist/**. Copy **RunningMan.app** to Applications if you want to keep it there. This is a development build; Developer ID signing and notarization are not configured.
 
+The app icon is generated from [Resources/AppIcon.png](Resources/AppIcon.png) at all ten standard macOS sizes on each build. Its [artwork prompt](Resources/AppIcon.prompt.txt) records how the retro action-poster illustration was created. To refresh the tracked ICNS after changing the PNG, run `swift scripts/make-icon.swift Resources`.
+
 For a faster native development build:
 
 ~~~sh

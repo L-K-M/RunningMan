@@ -1,64 +1,77 @@
 import AppKit
 import Foundation
 
-let output = CommandLine.arguments.count > 1 ? URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true) : URL(fileURLWithPath: "Resources", isDirectory: true)
-let iconset = output.appendingPathComponent("RunningMan.iconset", isDirectory: true)
-try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
-
-func stroke(_ points: [NSPoint], width: CGFloat, color: NSColor) {
-    let path = NSBezierPath()
-    path.move(to: points[0])
-    for point in points.dropFirst() { path.line(to: point) }
-    path.lineWidth = width
-    path.lineCapStyle = .round
-    path.lineJoinStyle = .round
-    color.setStroke()
-    path.stroke()
-}
-
-func draw() {
-    let bounds = NSRect(x: 48, y: 48, width: 928, height: 928)
-    let tile = NSBezierPath(roundedRect: bounds, xRadius: 205, yRadius: 205)
-    NSGraphicsContext.saveGraphicsState()
-    tile.addClip()
-    NSGradient(starting: NSColor(srgbRed: 0.17, green: 0.20, blue: 0.70, alpha: 1),
-               ending: NSColor(srgbRed: 0.38, green: 0.46, blue: 1, alpha: 1))!.draw(in: bounds, angle: 58)
-    stroke([NSPoint(x: 210, y: 735), NSPoint(x: 390, y: 735)], width: 27, color: NSColor.white.withAlphaComponent(0.16))
-    stroke([NSPoint(x: 170, y: 647), NSPoint(x: 300, y: 647)], width: 27, color: NSColor.white.withAlphaComponent(0.12))
-    stroke([NSPoint(x: 215, y: 557), NSPoint(x: 280, y: 557)], width: 27, color: NSColor.white.withAlphaComponent(0.1))
-    stroke([NSPoint(x: 248, y: 292), NSPoint(x: 372, y: 308), NSPoint(x: 492, y: 471), NSPoint(x: 585, y: 626)], width: 66, color: .white)
-    stroke([NSPoint(x: 495, y: 471), NSPoint(x: 614, y: 386), NSPoint(x: 590, y: 255)], width: 66, color: .white)
-    stroke([NSPoint(x: 570, y: 597), NSPoint(x: 447, y: 625), NSPoint(x: 366, y: 538)], width: 57, color: .white)
-    stroke([NSPoint(x: 571, y: 594), NSPoint(x: 681, y: 529), NSPoint(x: 766, y: 579)], width: 57, color: .white)
-    NSColor.white.setFill()
-    NSBezierPath(ovalIn: NSRect(x: 582, y: 669, width: 112, height: 112)).fill()
-    NSColor(srgbRed: 0.55, green: 0.98, blue: 0.77, alpha: 1).setFill()
-    NSBezierPath(ovalIn: NSRect(x: 757, y: 205, width: 82, height: 82)).fill()
-    NSGraphicsContext.restoreGraphicsState()
-}
-
-for size in [16, 32, 128, 256, 512] {
-    for scale in [1, 2] {
-        let pixels = size * scale
-        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
-            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
-            bytesPerRow: 0, bitsPerPixel: 0)!
-        let context = NSGraphicsContext(bitmapImageRep: bitmap)!
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = context
-        let transform = AffineTransform(scale: CGFloat(pixels) / 1024)
-        (transform as NSAffineTransform).concat()
-        draw()
-        NSGraphicsContext.restoreGraphicsState()
-        let suffix = scale == 2 ? "@2x" : ""
-        try bitmap.representation(using: .png, properties: [:])!.write(to: iconset.appendingPathComponent("icon_\(size)x\(size)\(suffix).png"))
+/// Build a macOS icon from the canonical square PNG without drawing or cropping
+/// artwork. The source's alpha and composition are preserved at every size.
+private enum IconError: LocalizedError {
+    case invalid(String)
+    var errorDescription: String? {
+        switch self { case .invalid(let message): return message }
     }
 }
-let task = Process()
-task.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-task.arguments = ["-c", "icns", iconset.path, "-o", output.appendingPathComponent("AppIcon.icns").path]
-try task.run()
-task.waitUntilExit()
-guard task.terminationStatus == 0 else { fatalError("iconutil failed") }
-try FileManager.default.removeItem(at: iconset)
-print("Generated \(output.appendingPathComponent("AppIcon.icns").path)")
+
+private func generateIcon() throws {
+    guard CommandLine.arguments.count <= 3 else {
+        throw IconError.invalid("Usage: swift scripts/make-icon.swift [OUTPUT_DIRECTORY] [SOURCE_PNG]")
+    }
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    let output = CommandLine.arguments.count > 1
+        ? URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+        : root.appendingPathComponent("Resources", isDirectory: true)
+    let source = CommandLine.arguments.count > 2
+        ? URL(fileURLWithPath: CommandLine.arguments[2])
+        : root.appendingPathComponent("Resources/AppIcon.png")
+    let data = try Data(contentsOf: source)
+    guard data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]),
+          let bitmap = NSBitmapImageRep(data: data), let image = bitmap.cgImage else {
+        throw IconError.invalid("The source icon must be a valid PNG: \(source.path)")
+    }
+    guard image.width == image.height, image.width >= 1024 else {
+        throw IconError.invalid("The source icon must be square and at least 1024 × 1024 pixels; found \(image.width) × \(image.height).")
+    }
+    guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+        throw IconError.invalid("The sRGB color space is unavailable.")
+    }
+
+    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-icon-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: temporary) }
+    let iconset = temporary.appendingPathComponent("RunningMan.iconset", isDirectory: true)
+    try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: false)
+    for size in [16, 32, 128, 256, 512] {
+        for scale in [1, 2] {
+            let pixels = size * scale
+            guard let context = CGContext(data: nil, width: pixels, height: pixels, bitsPerComponent: 8,
+                bytesPerRow: pixels * 4, space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue), let _ = context.data else {
+                throw IconError.invalid("Could not create the \(pixels)-pixel icon canvas.")
+            }
+            context.interpolationQuality = .high
+            context.setBlendMode(.copy)
+            context.draw(image, in: CGRect(x: 0, y: 0, width: pixels, height: pixels))
+            guard let resized = context.makeImage(),
+                  let png = NSBitmapImageRep(cgImage: resized).representation(using: .png, properties: [:]) else {
+                throw IconError.invalid("Could not encode the \(pixels)-pixel icon.")
+            }
+            let suffix = scale == 2 ? "@2x" : ""
+            try png.write(to: iconset.appendingPathComponent("icon_\(size)x\(size)\(suffix).png"))
+        }
+    }
+    let generated = temporary.appendingPathComponent("AppIcon.icns")
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
+    task.arguments = ["-c", "icns", iconset.path, "-o", generated.path]
+    try task.run()
+    task.waitUntilExit()
+    guard task.terminationStatus == 0 else { throw IconError.invalid("iconutil failed (\(task.terminationStatus)).") }
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    let destination = output.appendingPathComponent("AppIcon.icns")
+    try Data(contentsOf: generated).write(to: destination, options: .atomic)
+    print("Generated \(destination.path) from \(source.path)")
+}
+
+do { try generateIcon() }
+catch {
+    FileHandle.standardError.write(Data("make-icon: \(error.localizedDescription)\n".utf8))
+    exit(1)
+}

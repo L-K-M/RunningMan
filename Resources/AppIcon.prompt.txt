@@ -1,0 +1,10 @@
+RunningMan app icon
+
+Generated with the built-in image_gen tool using the user's supplied retro
+action-poster image as a visual reference. The reference is not stored here.
+AppIcon.png is the canonical artwork; scripts/make-icon.swift derives the
+standard macOS ICNS representations without cropping or redrawing it.
+
+Generation prompt:
+
+Use case: stylized-concept. Asset type: finished native macOS application icon for RunningMan, square 1024x1024. Input Image 1 is a visual reference for the hero, palette and retro hand-painted action-movie-poster mood; create new icon artwork inspired by it, not a rectangular poster or a mockup. Composition: a single bold close-up of the reference's determined, square-jawed male action hero, strong eye and brow, facing slightly right, filling most of a rounded-square app-icon tile. Warm amber/orange light on his face, deep midnight shadows and subtle violet/cyan arena glow in the background. Include a small dark diagonal chainsaw silhouette behind him at the upper-left, as a secondary hint from the reference; keep the hero face dominant, simple and readable at 32px. Style: richly painted 1980s VHS cover illustration, sculptural brushwork, restrained grain, striking light-dark separation, polished contemporary app icon finish. Layout: tile inset around 6% from the square canvas, macOS-style rounded corners, a subtle dimensional edge and soft shadow, genuinely transparent pixels outside the tile. Keep every element inside the tile. No text, no letters, no numbers, no logos, no gore, no blood, no extra faces, no icon grid, no device, no surrounding scene.
