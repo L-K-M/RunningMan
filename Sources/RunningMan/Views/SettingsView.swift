@@ -1,0 +1,111 @@
+import AppKit
+import SwiftUI
+import RunningManCore
+
+struct SettingsView: View {
+    @Environment(AppModel.self) private var model
+    var body: some View {
+        @Bindable var model = model
+        Form {
+            Section {
+                Toggle("Refresh runner status automatically", isOn: $model.refreshAutomatically)
+                Text("Refreshes local service state and diagnostic logs every three seconds while RunningMan is open.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Toggle("Keep this Mac awake while a job is running", isOn: $model.keepAwakeWhileBusy)
+                Text("Prevents idle sleep during detected jobs. Closing your MacBook lid can still put it to sleep.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            } header: { Text("Monitoring") }
+            Section {
+                LabeledContent("GitHub account") {
+                    HStack {
+                        Text(model.githubAccount ?? "Not checked").foregroundStyle(.secondary)
+                        Button("Check connection") { Task { await model.checkGitHub() } }
+                    }
+                }
+                Text("Connection uses your existing GitHub CLI sign-in. Runner discovery, logs and service controls also work offline.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            } header: { Text("GitHub") }
+            Section {
+                LabeledContent("Installed runners", value: "\(model.runners.count)")
+                LabeledContent("Start at login", value: "\(model.startsAtLoginCount) runners")
+                Text("Set automatic startup separately for each runner in its Overview. Services start when you log in to this macOS account, after startup or restart.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Button("Import an existing runner folder…", systemImage: "folder.badge.plus") { model.importRunner() }
+            } header: { Text("Runner services") }
+            Section {
+                LabeledContent("Recorded jobs", value: "\(model.jobs.count)")
+                Text("History is reconstructed from local diagnostic logs and saved on this Mac. Old or missing logs can limit the available history. Known secret patterns are redacted before display and export.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack {
+                    Button("Export diagnostics…", systemImage: "square.and.arrow.up") { model.exportDiagnostics() }
+                    Spacer()
+                    Button("Clear saved history…", role: .destructive) { model.clearHistory() }
+                        .disabled(model.jobs.isEmpty)
+                }
+            } header: { Text("History & diagnostics") }
+            Section {
+                HStack(spacing: 12) {
+                    Image(systemName: "figure.run.circle.fill").font(.system(size: 32)).foregroundStyle(.indigo)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("RunningMan").font(.system(size: 14, weight: .semibold, design: .rounded))
+                        Text("A little clarity for the runners behind your releases.").font(.system(size: 10)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+            }
+        }.formStyle(.grouped).frame(width: 560, height: 660)
+    }
+}
+
+struct RunnerMenuView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: "figure.run.circle.fill").font(.system(size: 24)).foregroundStyle(.indigo)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("RunningMan").font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Text("\(model.runningCount) running · \(model.busyCount) working").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.plain).help("Refresh")
+            }.padding(16)
+            Divider()
+            if model.runners.isEmpty {
+                Text("No runners discovered yet").font(.system(size: 11)).foregroundStyle(.secondary).padding(18)
+            } else {
+                ForEach(model.runners.prefix(8)) { snapshot in
+                    HStack(spacing: 10) {
+                        Circle().fill(snapshot.status.color).frame(width: 7, height: 7)
+                        Button {
+                            model.selectedRunnerID = snapshot.id
+                            model.section = .runners
+                            openWindow(id: "main")
+                            NSApp.activate(ignoringOtherApps: true)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(snapshot.runner.name).font(.system(size: 11, weight: .medium))
+                                Text(snapshot.currentJob?.name ?? snapshot.status.title).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                            }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        Menu { RunnerActionsMenu(snapshot: snapshot) } label: { Image(systemName: "ellipsis") }
+                            .menuStyle(.borderlessButton).frame(width: 20)
+                    }.padding(.horizontal, 17).padding(.vertical, 9)
+                }
+            }
+            Divider()
+            HStack {
+                Button("Open RunningMan") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+                Spacer()
+                Menu {
+                    Button("Start all enabled runners") { model.startAll() }
+                    Button("Stop all when idle") { model.stopAllWhenIdle() }
+                    Divider()
+                    Button("Quit RunningMan") { NSApp.terminate(nil) }
+                } label: { Image(systemName: "gearshape") }.menuStyle(.borderlessButton).frame(width: 20)
+            }.buttonStyle(.plain).font(.system(size: 10)).padding(16)
+        }.frame(width: 310).tint(.indigo)
+    }
+}
