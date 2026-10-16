@@ -200,6 +200,17 @@ struct RunnerDetailView: View {
                     RunnerWorkloadRow(snapshot: snapshot)
                 }
                 Surface {
+                    SectionHeading(title: "Release cleanup", subtitle: "Reported by this runner’s release workflow") {
+                        Button("View reports") { model.section = .cleanup }.buttonStyle(.link).font(.system(size: 11))
+                    }
+                    if let report = model.latestCleanup(for: snapshot.id) {
+                        CleanupResultSummary(report: report).padding(.top, 12)
+                    } else {
+                        Text("No cleanup reports yet. A release using the new cleanup workflow will report here after its upload attempts.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 12)
+                    }
+                }
+                Surface {
                     Text("Installation").font(.system(size: 13, weight: .semibold)).padding(.bottom, 13)
                     detailRow("Platform", value: runner.provider.title)
                     Divider().padding(.vertical, 9)

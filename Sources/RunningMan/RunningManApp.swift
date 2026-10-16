@@ -120,6 +120,9 @@ private struct WindowIdentity: NSViewRepresentable {
             model.section = .workload
             try await Task.sleep(for: .milliseconds(650))
             try capture(name: "workload-dark", directory: directory)
+            model.section = .cleanup
+            try await Task.sleep(for: .milliseconds(650))
+            try capture(name: "cleanup-dark", directory: directory)
             NSApp.terminate(nil)
         } catch {
             FileHandle.standardError.write(Data("Snapshot failed: \(error.localizedDescription)\n".utf8))

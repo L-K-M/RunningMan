@@ -119,12 +119,18 @@ public actor RunnerDiscovery {
                 runners.append(InstalledRunner(name: SecretRedactor.redact(name), directory: canonical,
                     githubURL: githubURL, agentID: metadata["agentId"] as? Int,
                     serviceLabel: serviceLabel, version: metadata["agentVersion"] as? String ?? Self.installedVersion(at: canonical),
-                    labels: runnerLabels.map(SecretRedactor.redact)))
+                    labels: runnerLabels.map(SecretRedactor.redact),
+                    workDirectoryURL: Self.workDirectory(metadata["workFolder"] as? String, in: canonical)))
             } catch {
                 warnings.append("Could not read runner settings in \(directory.lastPathComponent): \(error.localizedDescription)")
             }
         }
         return DiscoveryResult(runners: runners.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }, warnings: warnings)
+    }
+
+    private static func workDirectory(_ value: String?, in directory: URL) -> URL {
+        let folder = value.flatMap { !$0.isEmpty && !$0.contains("\n") && !$0.contains("\r") && $0.utf8.count < 4096 ? $0 : nil } ?? "_work"
+        return (folder.hasPrefix("/") ? URL(fileURLWithPath: folder) : directory.appendingPathComponent(folder)).standardizedFileURL
     }
 
     private static func forgejoService(_ plist: [String: Any]) -> InstalledRunner? {

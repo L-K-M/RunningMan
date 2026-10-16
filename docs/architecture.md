@@ -57,6 +57,18 @@ Sampled utilisation is separate from job history. Consecutive known idle/busy ob
 
 ## History and diagnostics
 
+Release cleanup is performed by the workflow's vendored `release-job.swift`
+helper in a uniquely marked temporary source copy, after upload attempts. It
+validates ownership before removal and leaves a private JSON report outside the
+removed tree. Cleanup status is separate from release status; interruption can
+leave an unconfirmed pending report.
+
+`RunnerCleanupMonitor` reads only bounded report metadata from the public GitHub
+runner work directory. It rejects receipt symlinks and invalid records, binds
+reports to discovered runner identities, redacts text and caches unchanged files.
+The app never deletes report paths or infers successful cleanup for old jobs.
+The [integration guide](release-cleanup.md) defines the scope and recovery limits.
+
 The log monitor correlates listener dispatch/completion events and worker job context. Raw job context and private-key blocks are excluded from live tails. Known credential shapes are redacted before presentation or persistence.
 
 History merges retain confirmed completion results and enrich names, repositories and workflow links. Reconciliation only calls a job running when its runner is positively busy, keeping at most its configured capacity of newest unfinished records. Other unfinished records become unknown without fabricated end times. A stale historical record is never allowed to turn an idle runner into a busy one.

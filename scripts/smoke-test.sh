@@ -4,13 +4,13 @@ project_root="$(cd "$(dirname "$0")/.." && pwd)"
 app="${1:-$project_root/dist/RunningMan.app}"
 output="${2:-$project_root/.local/screenshots}"
 mkdir -p "$output"
-# These six files are owned by this smoke test. Remove prior captures so a
+# These eight files are owned by this smoke test. Remove prior captures so a
 # preview failure cannot accidentally pass using an earlier successful run.
-for name in overview runners workload history overview-dark workload-dark; do
+for name in overview runners workload history cleanup overview-dark workload-dark cleanup-dark; do
   rm -f "$output/$name.png"
 done
 "$app/Contents/MacOS/RunningMan" --demo --snapshot-dir "$output"
-for name in overview runners workload history overview-dark workload-dark; do
+for name in overview runners workload history cleanup overview-dark workload-dark cleanup-dark; do
   test -s "$output/$name.png"
 done
-echo "Captured six isolated RunningMan views in $output"
+echo "Captured eight isolated RunningMan views in $output"

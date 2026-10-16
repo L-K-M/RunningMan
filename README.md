@@ -12,6 +12,7 @@ The preview above uses fictional runners and jobs.
 
 - **Live fleet overview.** Running, busy, stopped and disabled runners, with job counts, success rate and recent activity.
 - **Queues and utilisation.** Compatible queued jobs, server-reported wait times, job slots and sampled busy rates, with explicit coverage and availability.
+- **Release cleanup reports.** See when a release removed its temporary build workspace, estimated bytes and files removed, and any incomplete cleanup.
 - **Independent controls.** Start and stop now, enable or disable a runner, and choose whether it starts at login.
 - **Finish the job first.** Stop a busy runner after its current job finishes; cancel that request any time. RunningMan must remain open until it stops the runner.
 - **Create and remove.** Register a repository or organization runner from its GitHub URL, download and verify the official runner, and install its user service. Unregister existing runners without deleting their workspaces.
@@ -116,6 +117,10 @@ Repository and organization scans are bounded and disclose partial access or ins
 
 ## History and privacy
 
+The **Cleanup** section reads reports written by participating release workflows. Each release builds in its own temporary source copy and removes that copy after upload attempts, including ordinary build or upload failures. The runner's configuration, diagnostic logs, development checkouts and shared tool caches remain outside that scope. Cleanup failure is reported separately from release upload success.
+
+The reports live in the runner work directory's **.runningman-cleanup/** folder. RunningMan reads bounded, validated reports and never deletes files through this view. A pending report is not proof of a running job or successful removal: power loss or a force-killed runner can prevent the final step. Old releases without reports show no cleanup evidence. Sizes represent logical file contents removed, rather than measured free space on APFS. See [the workflow integration guide](docs/release-cleanup.md) to add this to another repository.
+
 History is recovered from available local Runner and Worker diagnostics, then saved in **~/Library/Application Support/RunningMan/**. It is not a complete GitHub audit log. Rotated or deleted diagnostics cannot recover jobs that RunningMan has never seen.
 
 Unfinished jobs without evidence of a current worker show **Unknown**, with no invented completion time. Records with confirmed outcomes keep them when older logs are scanned again. Up to 2,000 jobs and 500 activity events are retained, with bounded log tails and incremental background reads.
@@ -132,7 +137,7 @@ scripts/smoke-test.sh
 
 `scripts/build.sh` also accepts `--universal`, `--zip`, `--run`, `--install` (replaces `/Applications/RunningMan.app`) and `--clean`. To cut a release, run `scripts/release.sh 1.2.0` on a clean, pushed `main` (`--dry-run` checks first): it updates the marked download link above, commits, tags `v1.2.0` and pushes both, after which the release workflow builds and publishes the zip and announces it to installed apps.
 
-The smoke test opens a clearly labelled synthetic preview workspace and saves six screenshots under **.local/screenshots/**, including light/dark workload views. It never controls installed runners. You can explore that preview manually:
+The smoke test opens a clearly labelled synthetic preview workspace and saves eight screenshots under **.local/screenshots/**, including light/dark workload and cleanup views. It never controls installed runners. You can explore that preview manually:
 
 ~~~sh
 open -na dist/RunningMan.app --args --demo

@@ -34,6 +34,8 @@ public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
     public var configurationURL: URL?
     public var diagnosticURLs: [URL]
     public var capacity: Int
+    /// Public GitHub workFolder metadata; never inferred from Forgejo credentials.
+    public var workDirectoryURL: URL?
     /// The existing storage name remains compatible with saved GitHub installations.
     public var remoteURL: URL? {
         get { githubURL }
@@ -47,16 +49,18 @@ public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
     public init(name: String, directory: URL, githubURL: URL? = nil, agentID: Int? = nil,
                 serviceLabel: String? = nil, version: String? = nil, labels: [String] = [],
                 provider: RunnerProvider = .github, executableURL: URL? = nil,
-                configurationURL: URL? = nil, diagnosticURLs: [URL] = [], capacity: Int = 1) {
+                configurationURL: URL? = nil, diagnosticURLs: [URL] = [], capacity: Int = 1,
+                workDirectoryURL: URL? = nil) {
         self.name = name; self.directory = directory; self.githubURL = githubURL
         self.agentID = agentID; self.serviceLabel = serviceLabel; self.version = version; self.labels = labels
         self.provider = provider; self.executableURL = executableURL; self.configurationURL = configurationURL
         self.diagnosticURLs = diagnosticURLs; self.capacity = max(1, min(capacity, 256))
+        self.workDirectoryURL = workDirectoryURL
     }
 
     private enum CodingKeys: String, CodingKey {
         case name, directory, githubURL, agentID, serviceLabel, version, labels
-        case provider, executableURL, configurationURL, diagnosticURLs, capacity
+        case provider, executableURL, configurationURL, diagnosticURLs, capacity, workDirectoryURL
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -68,7 +72,8 @@ public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
             executableURL: try values.decodeIfPresent(URL.self, forKey: .executableURL),
             configurationURL: try values.decodeIfPresent(URL.self, forKey: .configurationURL),
             diagnosticURLs: try values.decodeIfPresent([URL].self, forKey: .diagnosticURLs) ?? [],
-            capacity: try values.decodeIfPresent(Int.self, forKey: .capacity) ?? 1)
+            capacity: try values.decodeIfPresent(Int.self, forKey: .capacity) ?? 1,
+            workDirectoryURL: try values.decodeIfPresent(URL.self, forKey: .workDirectoryURL))
     }
 }
 
