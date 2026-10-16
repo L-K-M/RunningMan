@@ -5,6 +5,21 @@ import RunningManServices
 @testable import RunningMan
 
 final class AppModelTests: XCTestCase {
+    @MainActor func testCleanupEvidenceIsSeparateFromJobSuccessAndSearchesRunner() {
+        let model = AppModel(demoMode: true)
+        XCTAssertEqual(model.cleanupRecords.count, 4)
+        XCTAssertTrue(model.cleanupRecords.contains { $0.status == .pending && $0.finishedAt == nil })
+        XCTAssertTrue(model.cleanupRecords.contains { $0.status == .failed })
+        let jobsBefore = model.jobs
+        model.section = .cleanup
+        model.searchText = "nightly-checks"
+        XCTAssertEqual(model.filteredCleanupRecords.count, 1)
+        XCTAssertEqual(model.filteredCleanupRecords.first?.status, .failed)
+        XCTAssertEqual(model.jobs, jobsBefore)
+        XCTAssertNotNil(model.latestCleanup(for: model.runners[0].id))
+        XCTAssertNil(model.latestCleanup(for: model.runners[4].id))
+    }
+
     @MainActor func testBusyStopRequiresConfirmationAndCancellationPreservesRunner() {
         let model = AppModel(demoMode: true)
         let busy = model.runners.first { $0.status == .busy }!

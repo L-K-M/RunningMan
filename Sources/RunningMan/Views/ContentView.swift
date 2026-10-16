@@ -20,6 +20,7 @@ struct ContentView: View {
                     case .runners: RunnersView()
                     case .workload: WorkloadView()
                     case .history: HistoryView()
+                    case .cleanup: CleanupView()
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -46,7 +47,7 @@ struct ContentView: View {
                 }
             }
             .searchable(text: $model.searchText, placement: .toolbar,
-                        prompt: model.section == .history ? "Search job history" : model.section == .workload ? "Search queues or scopes" : "Find a runner")
+                        prompt: model.section == .history ? "Search job history" : model.section == .workload ? "Search queues or scopes" : model.section == .cleanup ? "Search cleanup reports" : "Find a runner")
         }
         .tint(RunningManStyle.accent)
         .frame(minWidth: 1000, minHeight: 650)

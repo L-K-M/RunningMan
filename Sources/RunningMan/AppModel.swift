@@ -6,13 +6,13 @@ import RunningManServices
 import UniformTypeIdentifiers
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case overview, runners, workload, history
+    case overview, runners, workload, history, cleanup
     var id: String { rawValue }
     var title: String {
-        switch self { case .overview: return "Overview"; case .runners: return "Runners"; case .workload: return "Workload"; case .history: return "Job history" }
+        switch self { case .overview: return "Overview"; case .runners: return "Runners"; case .workload: return "Workload"; case .history: return "Job history"; case .cleanup: return "Cleanup" }
     }
     var systemImage: String {
-        switch self { case .overview: return "square.grid.2x2"; case .runners: return "server.rack"; case .workload: return "chart.bar.xaxis"; case .history: return "clock.arrow.circlepath" }
+        switch self { case .overview: return "square.grid.2x2"; case .runners: return "server.rack"; case .workload: return "chart.bar.xaxis"; case .history: return "clock.arrow.circlepath"; case .cleanup: return "sparkles" }
     }
 }
 
@@ -33,6 +33,8 @@ final class AppModel {
     var warnings: [String] = []
     var workload: WorkloadReport?
     var observedUsage: [String: ObservedRunnerUsage] = [:]
+    var cleanupRecords: [RunnerCleanupRecord] = []
+    var cleanupWarnings: [String] = []
     var isRefreshingWorkload = false
     var showingForgejoConnection = false { didSet { if showingForgejoConnection { showMainWindow?() } } }
     var forgejoServers: [URL] = []
@@ -81,6 +83,7 @@ final class AppModel {
     @ObservationIgnored private let forgejoConnections = ForgejoConnectionStore()
     @ObservationIgnored private let forgejoLogs = ForgejoLogMonitor()
     @ObservationIgnored private let workloadMonitor = WorkloadMonitor()
+    @ObservationIgnored private let cleanupMonitor = RunnerCleanupMonitor()
     @ObservationIgnored private let history: RunnerHistoryStore
     @ObservationIgnored private let eventStore: ActivityStore
     @ObservationIgnored private let activitySamples: RunnerActivityStore
@@ -180,7 +183,11 @@ final class AppModel {
         let states = await controller.snapshots(for: result.runners, allowRemoteActivity: remoteMonitoringEnabled)
         async let githubScan = logs.scan(runners: result.runners.filter { $0.provider == .github })
         async let forgejoScan = forgejoLogs.scan(runners: result.runners.filter { $0.provider == .forgejo })
+        async let cleanupScan = cleanupMonitor.scan(runners: result.runners)
         let (github, forgejo) = await (githubScan, forgejoScan)
+        let cleanup = await cleanupScan
+        cleanupRecords = cleanup.records
+        cleanupWarnings = cleanup.warnings
         let scan = LogScanResult(jobs: github.jobs + forgejo.jobs, events: github.events + forgejo.events,
                                 warnings: github.warnings + forgejo.warnings,
                                 tails: github.tails.merging(forgejo.tails) { _, latest in latest })
@@ -194,7 +201,7 @@ final class AppModel {
         }
         let oldStates = Dictionary(uniqueKeysWithValues: runners.map { ($0.id, $0.status) })
         runners = next.sorted { $0.runner.name.localizedStandardCompare($1.runner.name) == .orderedAscending }
-        warnings = Array((result.warnings + scan.warnings).map(SecretRedactor.redact).prefix(20))
+        warnings = Array((result.warnings + scan.warnings + cleanup.warnings).map(SecretRedactor.redact).prefix(20))
         do {
             try await activitySamples.record(snapshots: runners)
             var metrics: [String: ObservedRunnerUsage] = [:]
@@ -254,6 +261,20 @@ final class AppModel {
     }
     func usage(for runner: InstalledRunner) -> RunnerUsageMetrics {
         RunnerUsage.calculate(runner: runner, jobs: jobs)
+    }
+
+    var filteredCleanupRecords: [RunnerCleanupRecord] {
+        let query = section == .cleanup ? searchText.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        return cleanupRecords.filter { record in
+            query.isEmpty || [record.repository, record.job, record.status.title, runnerName(for: record.runnerID)]
+                .contains { $0.localizedCaseInsensitiveContains(query) }
+        }.sorted { ($0.finishedAt ?? $0.startedAt) > ($1.finishedAt ?? $1.startedAt) }
+    }
+
+    func runnerName(for id: String) -> String { runners.first { $0.id == id }?.runner.name ?? "Runner no longer installed" }
+
+    func latestCleanup(for runnerID: String) -> RunnerCleanupRecord? {
+        cleanupRecords.filter { $0.runnerID == runnerID }.max { ($0.finishedAt ?? $0.startedAt) < ($1.finishedAt ?? $1.startedAt) }
     }
 
     func selectionChanged() { updateSelectedLog() }
@@ -549,7 +570,7 @@ final class AppModel {
     func exportDiagnostics() {
         let panel = NSSavePanel()
         panel.title = "Export runner diagnostics"
-        panel.message = "Includes runner names, installation paths, job history and redacted log excerpts. Registration credentials are never included."
+        panel.message = "Includes runner names, installation paths, job and cleanup history, and redacted log excerpts. Registration credentials are never included."
         panel.nameFieldStringValue = "RunningMan-diagnostics.json"
         panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK, let destination = panel.url else { return }
@@ -565,13 +586,14 @@ final class AppModel {
             var runners: [State]
             var jobs: [RunnerJob]
             var events: [ActivityEvent]
+            var cleanup: [RunnerCleanupRecord]
             var logs: [String: String]
             var warnings: [String]
         }
         let report = Report(generatedAt: Date(), runners: runners.map {
             .init(runner: $0.runner, status: $0.status, processID: $0.processID,
                   startsAtLogin: $0.startsAtLogin, enabled: $0.isEnabled)
-        }, jobs: jobs, events: events, logs: logTails.mapValues(SecretRedactor.redact), warnings: warnings)
+        }, jobs: jobs, events: events, cleanup: cleanupRecords, logs: logTails.mapValues(SecretRedactor.redact), warnings: warnings)
         Task {
             do {
                 try await Task.detached {
@@ -697,6 +719,28 @@ final class AppModel {
                 runnerIDs: [forgeRunner.id, docsRunner.id], runnerLabels: [forgeRunner.id: forgeRunner.labels, docsRunner.id: docsRunner.labels],
                 capacity: 3, remoteBusyRunnerIDs: [forgeRunner.id])
         ])
+        cleanupRecords = [
+            RunnerCleanupRecord(id: "B314EC3B-B92B-4BE6-A1B1-F846511BB090", runnerID: runners[1].id,
+                repository: runners[1].runner.repository, runID: "1048", runAttempt: "1", job: "Release app",
+                runURL: URL(string: "https://github.com/octocat/TrailNotes/actions/runs/1048"),
+                startedAt: now.addingTimeInterval(-2100), finishedAt: now.addingTimeInterval(-1500), status: .success,
+                bytesRemoved: 3_250_000_000, filesRemoved: 18_420,
+                paths: [RunnerCleanupPath(path: "/Users/demo/Runners/swift-builder/_work/_temp/runningman-release-example", status: .success,
+                    bytesRemoved: 3_250_000_000, filesRemoved: 18_420)]),
+            RunnerCleanupRecord(id: "DD2ADAD6-3F4B-4FB0-8886-843DD8FAEDDB", runnerID: runners[2].id,
+                repository: runners[2].runner.repository, runID: "1047", runAttempt: "1", job: "Release app",
+                runURL: URL(string: "https://github.com/octocat/Portfolio/actions/runs/1047"),
+                startedAt: now.addingTimeInterval(-5700), finishedAt: now.addingTimeInterval(-5100), status: .success,
+                bytesRemoved: 890_000_000, filesRemoved: 4_080, paths: []),
+            RunnerCleanupRecord(id: "24E01585-E5B9-4B7A-A9FE-545A63FB94EA", runnerID: runners[3].id,
+                repository: runners[3].runner.repository, runID: "1046", runAttempt: "1", job: "Release app",
+                runURL: nil, startedAt: now.addingTimeInterval(-7500), finishedAt: now.addingTimeInterval(-6900), status: .failed,
+                bytesRemoved: 0, filesRemoved: 0, paths: [], message: "Workspace ownership could not be verified. No files were deleted."),
+            RunnerCleanupRecord(id: "9EC3EE52-1D86-4269-924F-B031D144B4AB", runnerID: runners[0].id,
+                repository: runners[0].runner.repository, runID: "1049", runAttempt: "1", job: "Release app",
+                runURL: nil, startedAt: now.addingTimeInterval(-180), finishedAt: nil, status: .pending,
+                bytesRemoved: 0, filesRemoved: 0, paths: [])
+        ]
         selectedRunnerID = runners.first?.id
         githubAccount = "octocat"
         events = [
