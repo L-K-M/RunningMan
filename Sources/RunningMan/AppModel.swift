@@ -75,7 +75,7 @@ final class AppModel {
         }
     }
 
-    @ObservationIgnored private let discovery = RunnerDiscovery()
+    @ObservationIgnored private let discovery = RunnerDiscovery(systemDaemonsDirectory: RunnerDiscovery.systemDaemonsDirectory)
     @ObservationIgnored private let logs = RunnerLogMonitor()
     @ObservationIgnored private let controller = RunnerServiceController()
     @ObservationIgnored private let installer = GitHubRunnerInstaller()
@@ -281,6 +281,7 @@ final class AppModel {
 
     func perform(_ action: RunnerAction, on runner: RunnerSnapshot) {
         guard !busyRunnerIDs.contains(runner.id) else { return }
+        guard requireUserService(runner) else { return }
         if action == .drain {
             if runner.runner.provider == .forgejo && !remoteMonitoringEnabled && !demoMode {
                 errorMessage = "Enable server monitoring in Workload to verify when this Forgejo runner becomes idle. Stop now is available with an interruption confirmation."
@@ -351,6 +352,7 @@ final class AppModel {
     }
 
     func setStartup(_ enabled: Bool, for runner: RunnerSnapshot) {
+        guard requireUserService(runner) else { return }
         if demoMode {
             if let index = runners.firstIndex(where: { $0.id == runner.id }) { runners[index].startsAtLogin = enabled }
             return
@@ -369,10 +371,16 @@ final class AppModel {
     }
 
     func startAll() {
-        for runner in runners where runner.isEnabled && !runner.status.isRunning && runner.processID == nil { perform(.start, on: runner) }
+        for runner in runners where runner.runner.serviceDomain == .user && runner.isEnabled && !runner.status.isRunning && runner.processID == nil { perform(.start, on: runner) }
     }
     func stopAllWhenIdle() {
-        for runner in runners where (runner.status.isRunning || runner.processID != nil) && !drainingRunnerIDs.contains(runner.id) { perform(.drain, on: runner) }
+        for runner in runners where runner.runner.serviceDomain == .user && (runner.status.isRunning || runner.processID != nil) && !drainingRunnerIDs.contains(runner.id) { perform(.drain, on: runner) }
+    }
+    /// System LaunchDaemons are monitored only; the service controller refuses them too.
+    private func requireUserService(_ runner: RunnerSnapshot) -> Bool {
+        guard runner.runner.serviceDomain == .system else { return true }
+        errorMessage = "\(runner.runner.name) is managed by a system LaunchDaemon. RunningMan monitors it but does not start, stop or change system services."
+        return false
     }
 
     func checkGitHub() async {
@@ -529,7 +537,7 @@ final class AppModel {
                 let canonical = url.resolvingSymlinksInPath().standardizedFileURL
                 let result = await discovery.discover(additionalDirectories: [canonical])
                 guard result.runners.contains(where: { $0.directory.standardizedFileURL == canonical }) else {
-                    errorMessage = "No configured GitHub Actions runner was found in \(canonical.lastPathComponent). Choose its installation folder."
+                    errorMessage = "No configured runner was found in \(canonical.lastPathComponent). Choose a GitHub runner folder, a RunningMan Forgejo installation, or a Forgejo folder used by a login service."
                     continue
                 }
                 if !importedDirectories.contains(canonical) { importedDirectories.append(canonical) }

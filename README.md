@@ -54,7 +54,7 @@ open dist/RunningMan.app
 
 ## Existing runners
 
-Open RunningMan. It checks runner installation folders immediately below your home directory, its own managed runner directory, and your user LaunchAgents. Use **Import existing runner…** for installations elsewhere.
+Open RunningMan. It checks runner installation folders immediately below your home directory, its own managed runner directory, your user LaunchAgents, and Forgejo system LaunchDaemons that run as your account. Use **Import existing runner…** for installations elsewhere.
 
 Discovery reads non-secret runner metadata and local diagnostics. It never executes a discovered runner or reads its credential files. Opening the app does not start, stop or reconfigure runners.
 
@@ -100,6 +100,8 @@ RunningMan installs the checksummed Homebrew core `forgejo-runner` package when 
 Native Mac labels use the `:host` suffix, such as `macos-arm64:host`; use `macos-arm64` in the workflow's `runs-on`. Capacity is the maximum number of concurrent jobs. Start with one for Xcode builds unless the Mac has enough resources for more.
 
 Discovery reads RunningMan's public descriptor and user LaunchAgent metadata. It never opens Forgejo's credential-bearing `.runner` or YAML configuration files. Existing installations referenced by an owned user login service can be discovered and controlled in place; importing an arbitrary folder alone cannot safely recover private registration metadata. Removing a runner from Forgejo requires its numeric registration ID, scope and API access.
+
+A Forgejo daemon installed as a system LaunchDaemon in **/Library/LaunchDaemons** with your account as its `UserName` appears for monitoring only: process, live log and job history. RunningMan never starts, stops, disables, unregisters or edits system services; manage those with an administrator account. Without a RunningMan descriptor, its activity shows **Unknown** and its labels and server are not shown. Jobs the server cancels or fails are recorded from the daemon log; other outcomes are not logged at the default level and remain **Unknown**.
 
 For Homebrew services, the login checkbox also handles simple KeepAlive policies. RunningMan preserves the original policy in a private backup and restores it only if the service has not otherwise changed. Complex startup conditions are reported for manual configuration.
 

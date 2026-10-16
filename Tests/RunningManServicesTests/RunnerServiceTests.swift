@@ -216,6 +216,8 @@ final class RunnerServiceTests: XCTestCase {
     func testServiceParsers() {
         XCTAssertEqual(RunnerServiceController.parseServices("- 0 actions.runner.one\n12 0 actions.runner.two\n8 0 com.example.other"), ["actions.runner.one": 0, "actions.runner.two": 12])
         XCTAssertEqual(RunnerServiceController.parseDisabled(#"{ "actions.runner.one" => true, "actions.runner.two" => false }"#), ["actions.runner.one"])
+        // Current macOS spells the override as disabled/enabled.
+        XCTAssertEqual(RunnerServiceController.parseDisabled(#"{ "actions.runner.three" => disabled, "actions.runner.four" => enabled, "actions.runner.disabledness" => enabled }"#), ["actions.runner.three"])
     }
 }
 

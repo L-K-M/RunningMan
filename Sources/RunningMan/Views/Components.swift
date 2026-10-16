@@ -145,7 +145,10 @@ struct RunnerActionsMenu: View {
     @Environment(AppModel.self) private var model
     let snapshot: RunnerSnapshot
     var body: some View {
-        if snapshot.status.isRunning || snapshot.processID != nil {
+        let controllable = snapshot.runner.serviceDomain == .user
+        if !controllable {
+            Text("Managed by a system service")
+        } else if snapshot.status.isRunning || snapshot.processID != nil {
             Button(model.drainingRunnerIDs.contains(snapshot.id) ? "Cancel stop when idle" : "Stop when idle", systemImage: "moon.zzz") { model.perform(.drain, on: snapshot) }
                 .help("Stop after this job finishes. Keep RunningMan open until the runner stops.")
             Button("Stop runner", systemImage: "stop.fill") { model.perform(.stop, on: snapshot) }
@@ -153,19 +156,23 @@ struct RunnerActionsMenu: View {
             Button("Start runner", systemImage: "play.fill") { model.perform(.start, on: snapshot) }
                 .disabled(!snapshot.isEnabled)
         }
-        Divider()
-        Button(snapshot.isEnabled ? "Disable runner" : "Enable runner", systemImage: snapshot.isEnabled ? "pause.circle" : "checkmark.circle") {
-            model.perform(snapshot.isEnabled ? .disable : .enable, on: snapshot)
-        }
-        Button(snapshot.startsAtLogin ? "Turn off start at login" : "Start at login", systemImage: "power") {
-            model.setStartup(!snapshot.startsAtLogin, for: snapshot)
+        if controllable {
+            Divider()
+            Button(snapshot.isEnabled ? "Disable runner" : "Enable runner", systemImage: snapshot.isEnabled ? "pause.circle" : "checkmark.circle") {
+                model.perform(snapshot.isEnabled ? .disable : .enable, on: snapshot)
+            }
+            Button(snapshot.startsAtLogin ? "Turn off start at login" : "Start at login", systemImage: "power") {
+                model.setStartup(!snapshot.startsAtLogin, for: snapshot)
+            }
         }
         Divider()
         Button("Show in Finder", systemImage: "folder") { model.revealRunner(snapshot.runner) }
         Button("Open on \(snapshot.runner.provider.title)", systemImage: "arrow.up.right.square") { model.openGitHub(snapshot.runner) }
             .disabled(snapshot.runner.githubURL == nil)
-        Divider()
-        Button("Delete runner…", systemImage: "trash", role: .destructive) { model.perform(.delete, on: snapshot) }
+        if controllable {
+            Divider()
+            Button("Delete runner…", systemImage: "trash", role: .destructive) { model.perform(.delete, on: snapshot) }
+        }
     }
 }
 

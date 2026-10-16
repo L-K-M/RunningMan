@@ -29,8 +29,10 @@ private actor ForgejoCommandExecutor: ProcessExecuting {
     var processOutput = ""
     var serviceOutput = ""
     var disabledOutput = ""
+    var systemService = ProcessResult(status: 113, output: "", error: "Could not find service")
     init(package: URL) { self.package = package }
     func configure(processes: String = "", services: String = "", disabled: String = "") { processOutput = processes; serviceOutput = services; disabledOutput = disabled }
+    func configureSystemService(_ result: ProcessResult) { systemService = result }
     func recorded() -> [ProcessRequest] { commands }
     func run(_ request: ProcessRequest) async throws -> ProcessResult {
         commands.append(request)
@@ -39,6 +41,7 @@ private actor ForgejoCommandExecutor: ProcessExecuting {
         if request.executable == "/bin/ps" { return ProcessResult(status: 0, output: processOutput, error: "") }
         if request.arguments.first == "list" { return ProcessResult(status: 0, output: serviceOutput, error: "") }
         if request.arguments.first == "print-disabled" { return ProcessResult(status: 0, output: disabledOutput, error: "") }
+        if request.arguments.first == "print", request.arguments.last?.hasPrefix("system/") == true { return systemService }
         return ProcessResult(status: 0, output: "", error: "")
     }
 }
@@ -196,6 +199,68 @@ final class ForgejoServiceTests: XCTestCase {
         let calls = await api.recorded()
         XCTAssertFalse(calls.contains { $0.method == "DELETE" })
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(RunnerInstallationDescriptor.fileName).path))
+    }
+    private func systemRunner() throws -> InstalledRunner {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return InstalledRunner(name: "forgejo-runner", directory: root, serviceLabel: "org.example.forgejo-runner", provider: .forgejo,
+            executableURL: package.appendingPathComponent("bin/forgejo-runner"), configurationURL: root.appendingPathComponent("config.yml"),
+            serviceDomain: .system)
+    }
+    func testSystemDaemonIsObservedButNeverControlled() async throws {
+        let runner = try systemRunner()
+        await executor.configureSystemService(ProcessResult(status: 0, output: "system/org.example.forgejo-runner = {\n\tstate = running\n\tresource coalition = {\n\t\tpid = 5\n\t}\n\tpid = 77\n}\n", error: ""))
+        let controller = RunnerServiceController(homeDirectory: home, executor: executor, forgejoAPI: api)
+        let snapshotSnapshots = await controller.snapshots(for: [runner])
+        let snapshot = try XCTUnwrap(snapshotSnapshots.first)
+        XCTAssertEqual(snapshot.processID, 77)
+        XCTAssertEqual(snapshot.status, .unknown, "A daemon without server evidence must not be called idle")
+        XCTAssertFalse(snapshot.startsAtLogin); XCTAssertTrue(snapshot.isEnabled)
+        XCTAssertTrue(snapshot.detail?.contains("system service org.example.forgejo-runner") == true)
+        let before = await executor.recorded().count
+        let operations: [(String, () async throws -> Void)] = [
+            ("start", { try await controller.start(runner) }),
+            ("stop", { try await controller.stop(runner, force: true) }),
+            ("enable", { try await controller.setEnabled(true, for: runner) }),
+            ("disable", { try await controller.setEnabled(false, for: runner, force: true) }),
+            ("login", { try await controller.setStartsAtLogin(false, for: runner) }),
+            ("delete", { try await controller.delete(runner, trashFiles: true, force: true) })]
+        for (name, operation) in operations {
+            do { try await operation(); XCTFail("\(name) must refuse a system LaunchDaemon") }
+            catch { XCTAssertTrue(error.localizedDescription.contains("system LaunchDaemon"), name) }
+        }
+        let commands = Array(await executor.recorded().dropFirst(before))
+        XCTAssertTrue(commands.isEmpty, "Refusal must happen before any launchctl, kill or API call")
+        let calls = await api.recorded()
+        XCTAssertTrue(calls.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("Library/LaunchAgents").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+    }
+    func testUnloadedOrDisabledSystemDaemonIsNotRunning() async throws {
+        let runner = try systemRunner()
+        let controller = RunnerServiceController(homeDirectory: home, executor: executor, forgejoAPI: api)
+        let stoppedSnapshots = await controller.snapshots(for: [runner])
+        let stopped = try XCTUnwrap(stoppedSnapshots.first)
+        XCTAssertEqual(stopped.status, .stopped); XCTAssertNil(stopped.processID)
+        await executor.configure(disabled: "\tdisabled services = {\n\t\t\"org.example.forgejo-runner\" => disabled\n\t}\n")
+        let disabledSnapshots = await controller.snapshots(for: [runner])
+        let disabled = try XCTUnwrap(disabledSnapshots.first)
+        XCTAssertEqual(disabled.status, .disabled); XCTAssertFalse(disabled.isEnabled)
+    }
+    func testUnreadableSystemDaemonStateIsUnknown() async throws {
+        let runner = try systemRunner()
+        await executor.configureSystemService(ProcessResult(status: 5, output: "", error: "Input/output error"))
+        let controller = RunnerServiceController(homeDirectory: home, executor: executor, forgejoAPI: api)
+        let snapshotSnapshots = await controller.snapshots(for: [runner])
+        let snapshot = try XCTUnwrap(snapshotSnapshots.first)
+        XCTAssertEqual(snapshot.status, .unknown); XCTAssertNil(snapshot.processID)
+        XCTAssertEqual(snapshot.detail, "Some local process or launch service information could not be read.")
+    }
+    func testDaemonStartedWithShortConfigurationFlagIsRecognised() {
+        let runner = InstalledRunner(name: "example", directory: root, provider: .forgejo,
+            executableURL: URL(fileURLWithPath: "/opt/example/bin/forgejo-runner"), configurationURL: URL(fileURLWithPath: "/opt/example/config.yml"))
+        XCTAssertEqual(RunnerProcesses("1551 1 /opt/example/bin/forgejo-runner daemon -c /opt/example/config.yml\n").pid(for: runner), 1551)
+        XCTAssertEqual(RunnerProcesses("1552 1 /opt/example/bin/forgejo-runner daemon --config /opt/example/config.yml\n").pid(for: runner), 1552)
+        XCTAssertNil(RunnerProcesses("1553 1 /opt/example/bin/forgejo-runner daemon -c /opt/example/other.yml\n").pid(for: runner))
     }
     private func importedFixture(arguments: [String]? = nil, workingDirectory: Bool = true, keepAlive: Any? = nil) throws -> (InstalledRunner, URL) {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
