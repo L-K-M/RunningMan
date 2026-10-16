@@ -26,10 +26,8 @@ build_number="$(git -C "$project_root" rev-list --count HEAD)"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary_directory/RunningMan" "$app/Contents/MacOS/RunningMan"
 
-if [[ ! -s "$project_root/Resources/AppIcon.icns" ]]; then
-  swift "$project_root/scripts/make-icon.swift" "$project_root/Resources"
-fi
-cp "$project_root/Resources/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
+# Rebuild from the canonical PNG so a stale tracked ICNS never hides new artwork.
+swift "$project_root/scripts/make-icon.swift" "$app/Contents/Resources"
 cp "$project_root/LICENSE" "$app/Contents/Resources/LICENSE"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
