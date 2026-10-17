@@ -158,9 +158,18 @@ public actor RunnerServiceController {
             // Only "not found" proves the service is unloaded. Killing the process of
             // a service launchd still supervises would let KeepAlive restart it.
             guard !state.timedOut, !state.truncated, state.status == 0 || state.status == Self.launchctlServiceNotFound else {
-                throw RunnerServiceError("Cannot verify whether the runner service is loaded. No action was taken.")
+                throw RunnerServiceError("Cannot verify whether the runner service is loaded. The runner was not stopped.")
             }
             if state.status == 0 {
+                _ = try await checked(executor, ProcessRequest(executable: "/bin/launchctl", arguments: ["bootout", target]), operation: "Stop runner")
+            }
+        } else if let plist = try stalePlist(for: runner) {
+            // The marker's plist was deleted, but launchd can still supervise the
+            // service it loaded from that file. Unload it only when launchd reports
+            // exactly that path, so another service with the same label is never touched.
+            let target = domain + "/" + plist.deletingPathExtension().lastPathComponent
+            let state = try await executor.run(ProcessRequest(executable: "/bin/launchctl", arguments: ["print", target]))
+            if state.status == 0, !state.timedOut, !state.truncated, Self.parseLoadedServicePath(state.output) == plist.path {
                 _ = try await checked(executor, ProcessRequest(executable: "/bin/launchctl", arguments: ["bootout", target]), operation: "Stop runner")
             }
         }
@@ -195,11 +204,13 @@ public actor RunnerServiceController {
         let descriptor = try await ensureService(for: runner)
         _ = try await checked(executor, ProcessRequest(executable: "/bin/launchctl", arguments: [enabled ? "enable" : "disable", domain + "/" + descriptor.label]), operation: enabled ? "Enable runner" : "Disable runner")
         guard !enabled else { return }
-        // Disable first, so a failed stop cannot leave the runner enabled. Busy
-        // state was checked once above: a second check after disabling could
-        // refuse and leave the runner disabled but still running.
-        do { try await performStop(runner) }
-        catch { throw RunnerServiceError("Disabled, but stopping failed: " + error.localizedDescription) }
+        // Disable first, so a failed stop cannot leave the runner enabled. A job can
+        // start while the service is prepared and disabled, so check again right
+        // before stopping; a busy runner then stays disabled but keeps its job.
+        do {
+            try await requireIdle(runner, force: force)
+            try await performStop(runner)
+        } catch { throw RunnerServiceError("Disabled, but stopping failed: " + error.localizedDescription) }
     }
 
     public func setStartsAtLogin(_ enabled: Bool, for runner: InstalledRunner) async throws {
@@ -322,6 +333,12 @@ public actor RunnerServiceController {
     }
     /// True when the marker names a missing plist with a safe label directly in
     /// the user's LaunchAgents folder. Anything else is still validated in full.
+    /// The missing plist a stale marker names, if the marker is stale.
+    private func stalePlist(for runner: InstalledRunner) throws -> URL? {
+        let marker = runner.directory.appendingPathComponent(".service")
+        guard !Self.isMissing(marker), try isStaleServiceMarker(marker) else { return nil }
+        return URL(fileURLWithPath: try runnerText(marker)).standardizedFileURL
+    }
     private func isStaleServiceMarker(_ marker: URL) throws -> Bool {
         let path = try runnerText(marker)
         guard path.hasPrefix("/") else { return false }
@@ -439,6 +456,13 @@ public actor RunnerServiceController {
         return states
     }
     private static let launchctlServiceNotFound: Int32 = 113
+    /// The plist path launchd loaded a service from: the top-level `path` key only.
+    static func parseLoadedServicePath(_ text: String) -> String? {
+        for line in text.split(separator: "\n") where line.hasPrefix("\tpath = ") {
+            return String(line.dropFirst("\tpath = ".count))
+        }
+        return nil
+    }
     static func parseSystemServicePID(_ text: String) -> Int32? {
         // Only the service's own top-level key; nested blocks are indented further.
         for line in text.split(separator: "\n") where line.hasPrefix("\tpid = ") {
