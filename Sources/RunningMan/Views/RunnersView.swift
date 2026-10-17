@@ -4,17 +4,9 @@ import RunningManCore
 
 struct RunnersView: View {
     @Environment(AppModel.self) private var model
-    @State private var filter = "All"
-    private let filters = ["All", "Running", "Stopped", "Attention"]
+    @State private var filter = RunnerStatusFilter.all
     private var runners: [RunnerSnapshot] {
-        model.filteredRunners.filter {
-            switch filter {
-            case "Running": return $0.status.isRunning
-            case "Stopped": return $0.status == .stopped || $0.status == .disabled
-            case "Attention": return $0.status == .attention || $0.status == .unknown
-            default: return true
-            }
-        }.sorted { $0.runner.name.localizedStandardCompare($1.runner.name) == .orderedAscending }
+        model.filteredRunners.filter { filter.matches($0.status) }.sorted { $0.runner.name.localizedStandardCompare($1.runner.name) == .orderedAscending }
     }
     var body: some View {
         HSplitView {
@@ -22,7 +14,7 @@ struct RunnersView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     PageHeading(eyebrow: "The fleet", title: "Runners", subtitle: "\(model.runners.count) installed on this Mac")
                     Picker("Show runners", selection: $filter) {
-                        ForEach(filters, id: \.self) { Text($0).tag($0) }
+                        ForEach(RunnerStatusFilter.allCases, id: \.self) { Text($0.title).tag($0) }
                     }.pickerStyle(.segmented).labelsHidden().controlSize(.small)
                 }.padding(22)
                 Divider()

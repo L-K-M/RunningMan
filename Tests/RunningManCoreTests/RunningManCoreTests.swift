@@ -18,6 +18,17 @@ final class RunningManCoreTests: XCTestCase {
         return InstalledRunner(name: "build-example", directory: url, githubURL: URL(string: "https://github.com/example/desktop"))
     }
 
+    func testStatusFiltersSeparateBusyFromOnlineRunners() {
+        XCTAssertEqual(RunnerStatusFilter.allCases.map(\.title), ["All", "Busy", "Online", "Stopped", "Attention"])
+
+        let matches = { (filter: RunnerStatusFilter) in RunnerStatus.allCases.filter(filter.matches) }
+        XCTAssertEqual(matches(.all), RunnerStatus.allCases)
+        XCTAssertEqual(matches(.busy), [.busy])
+        XCTAssertEqual(matches(.online), [.idle, .busy])
+        XCTAssertEqual(matches(.stopped), [.stopped, .disabled])
+        XCTAssertEqual(matches(.attention), [.attention, .unknown])
+    }
+
     func testDiscoveryBOMAndAbsoluteServicePathAndImportDeduplicate() async throws {
         let installation = temporary.appendingPathComponent("actions-runner-example")
         let plist = temporary.appendingPathComponent("Library/LaunchAgents/actions.runner.example.desktop.plist")

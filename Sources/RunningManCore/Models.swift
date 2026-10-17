@@ -26,6 +26,30 @@ public enum RunnerStatus: String, Codable, CaseIterable, Sendable {
     public var isRunning: Bool { self == .idle || self == .busy }
 }
 
+/// The Runners list's status segments. Online covers every started service,
+/// idle or busy; Busy narrows that to runners currently running a job.
+public enum RunnerStatusFilter: String, CaseIterable, Sendable {
+    case all, busy, online, stopped, attention
+    public var title: String {
+        switch self {
+        case .all: return "All"
+        case .busy: return "Busy"
+        case .online: return "Online"
+        case .stopped: return "Stopped"
+        case .attention: return "Attention"
+        }
+    }
+    public func matches(_ status: RunnerStatus) -> Bool {
+        switch self {
+        case .all: return true
+        case .busy: return status == .busy
+        case .online: return status.isRunning
+        case .stopped: return status == .stopped || status == .disabled
+        case .attention: return status == .attention || status == .unknown
+        }
+    }
+}
+
 public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
     public var id: String { directory.standardizedFileURL.path }
     public var name: String
