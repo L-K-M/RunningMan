@@ -271,8 +271,9 @@ extension View {
         .overlay(shape.strokeBorder(isSelected ? RunningManStyle.accent : RunningManStyle.line, lineWidth: isSelected ? 1.5 : 1))
     }
 
-    /// Spins a busy symbol: rotates on macOS 15 and later, pulses on macOS 14, and
-    /// stays still with Reduce Motion. Apply it only where the busy state is visible.
+    /// Bounces a symbol once when its busy state changes, and stays still with Reduce Motion.
+    /// A repeating effect kept the window redrawing for as long as a job ran: about 20% of a
+    /// core with two busy runners in a release build, against 3% without it.
     func busySymbolEffect(_ isBusy: Bool) -> some View {
         modifier(BusySymbolEffect(isBusy: isBusy))
     }
@@ -287,11 +288,7 @@ private struct BusySymbolEffect: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isBusy: Bool
     func body(content: Content) -> some View {
-        if #available(macOS 15, *) {
-            content.symbolEffect(.rotate, options: .repeating.speed(0.6), isActive: isBusy && !reduceMotion)
-        } else {
-            content.symbolEffect(.pulse, options: .repeating, isActive: isBusy && !reduceMotion)
-        }
+        content.symbolEffect(.bounce, value: isBusy).symbolEffectsRemoved(reduceMotion)
     }
 }
 
