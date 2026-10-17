@@ -166,6 +166,10 @@ final class AppModelTests: XCTestCase {
         model.busyRunnerIDs.insert(busy.id)
         model.perform(.drain, on: busy)
         XCTAssertFalse(model.drainingRunnerIDs.contains(busy.id))
+        // The in-flight stop failing afterwards concerns no request any more.
+        model.noteAutomaticStopFailure(runnerID: busy.id, message: "Synthetic failure")
+        XCTAssertFalse(model.events.contains { $0.kind == .failure && $0.runnerID == busy.id })
+        XCTAssertNil(model.drainFailures[busy.id])
         // A new request still waits for the action to finish.
         model.perform(.drain, on: busy)
         XCTAssertFalse(model.drainingRunnerIDs.contains(busy.id))

@@ -366,8 +366,10 @@ final class AppModel {
     /// and the request ends with a warning after `DrainFailure.attemptLimit` attempts.
     func noteAutomaticStopFailure(runnerID: String, message: String, at date: Date = Date()) {
         let name = runnerDisplayName(runnerID)
+        // The request ended while this stop ran (cancelled, or the runner stopped otherwise),
+        // so the failure no longer concerns anything the user asked for.
         guard drainingRunnerIDs.contains(runnerID) else {
-            record(title: "Automatic stop failed", runnerID: runnerID, detail: "\(name): \(message)", kind: .failure)
+            record(title: "Automatic stop did not finish", runnerID: runnerID, detail: "\(name): \(message)")
             return
         }
         let previous = drainFailures[runnerID]

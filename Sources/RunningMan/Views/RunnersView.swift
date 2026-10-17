@@ -133,6 +133,7 @@ struct RunnerDetailView: View {
                             Label(failure.message, systemImage: "exclamationmark.triangle.fill")
                                 .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                                 .help("Automatic stop attempt \(failure.attempts) of \(DrainFailure.attemptLimit) failed at \(failure.date.formatted(date: .omitted, time: .shortened)):\n\(failure.message)\nRunningMan tries again after \(failure.retryDate.formatted(date: .omitted, time: .shortened)).")
+                                .accessibilityLabel("Automatic stop attempt \(failure.attempts) of \(DrainFailure.attemptLimit) failed: \(failure.message). RunningMan tries again after \(failure.retryDate.formatted(date: .omitted, time: .shortened)).")
                         }
                     }
                     Spacer()
