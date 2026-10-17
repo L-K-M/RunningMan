@@ -22,7 +22,20 @@ output_directory="$project_root/dist"
 app="$output_directory/RunningMan.app"
 version="${RUNNINGMAN_VERSION:-0.1.0}"
 case "$version" in *[!0-9.]*|"") echo "RUNNINGMAN_VERSION must be a numeric version." >&2; exit 2 ;; esac
-build_number="$(git -C "$project_root" rev-list --count HEAD)"
+# CFBundleVersion is the commit count unless RUNNINGMAN_BUILD_NUMBER overrides
+# it. A shallow clone counts only the fetched commits, so CI checks out the
+# full history; a copy without .git builds with 0 rather than failing.
+if [ -n "${RUNNINGMAN_BUILD_NUMBER:-}" ]; then
+  build_number="$RUNNINGMAN_BUILD_NUMBER"
+elif build_number="$(git -C "$project_root" rev-list --count HEAD 2>/dev/null)"; then
+  if [ "$(git -C "$project_root" rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+    echo "warning: shallow clone, so build number $build_number is not the commit count. Fetch the full history or set RUNNINGMAN_BUILD_NUMBER." >&2
+  fi
+else
+  build_number=0
+  echo "warning: no git history, so the build number is 0. Set RUNNINGMAN_BUILD_NUMBER to override it." >&2
+fi
+case "$build_number" in *[!0-9]*|"") echo "RUNNINGMAN_BUILD_NUMBER must contain only digits." >&2; exit 2 ;; esac
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary_directory/RunningMan" "$app/Contents/MacOS/RunningMan"
 
