@@ -189,9 +189,15 @@ final class AppModel {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled else { break }
-                if refreshAutomatically || !drainingRunnerIDs.isEmpty || keepAwakeWhileBusy { await refresh() }
+                if needsBackgroundRefresh { await refresh() }
             }
         }
+    }
+
+    /// Features that depend on noticing changes keep refreshing with automatic refresh off:
+    /// stop-after-job, keep-awake and notifications (completions older than 15 minutes never notify).
+    var needsBackgroundRefresh: Bool {
+        refreshAutomatically || !drainingRunnerIDs.isEmpty || keepAwakeWhileBusy || notificationPreferences.isAnyEnabled
     }
 
     func stopMonitoring() {

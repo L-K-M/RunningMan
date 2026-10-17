@@ -5,6 +5,15 @@ import RunningManServices
 @testable import RunningMan
 
 final class AppModelTests: XCTestCase {
+    @MainActor func testNotificationsKeepBackgroundRefreshWithAutomaticRefreshOff() {
+        let model = AppModel(demoMode: true)
+        model.refreshAutomatically = false
+        model.keepAwakeWhileBusy = false
+        XCTAssertFalse(model.needsBackgroundRefresh)
+        model.notificationPreferences.jobFailures = true
+        XCTAssertTrue(model.needsBackgroundRefresh, "Completions are only noticed by a refresh")
+    }
+
     @MainActor func testCleanupEvidenceIsSeparateFromJobSuccessAndSearchesRunner() {
         let model = AppModel(demoMode: true)
         XCTAssertEqual(model.cleanupRecords.count, 4)

@@ -21,7 +21,7 @@ struct SettingsView: View {
                 Toggle("Notify when a job fails", isOn: $model.notificationPreferences.jobFailures)
                 Toggle("Notify when a job succeeds", isOn: $model.notificationPreferences.jobSuccesses)
                 Toggle("Notify when a runner stops unexpectedly", isOn: $model.notificationPreferences.unexpectedStops)
-                Text("Covers jobs that finish while RunningMan is open; cancelled jobs count as failures. A stop is unexpected when you did not start, stop or change that runner in RunningMan during the previous 30 seconds.")
+                Text("Covers jobs that finish while RunningMan is open; cancelled jobs count as failures. A stop is unexpected when you did not start, stop or change that runner in RunningMan during the previous 30 seconds. While any notification is on, RunningMan keeps checking runners even with automatic refresh off.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 notificationStatus
             } header: { Text("Notifications") }
