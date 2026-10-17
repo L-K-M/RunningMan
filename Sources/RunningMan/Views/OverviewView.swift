@@ -9,12 +9,12 @@ struct OverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 fleetSummary
-                HStack(spacing: 12) {
+                MetricRow {
                     MetricTile(title: "Runners online", value: "\(model.runningCount)", footnote: "of \(model.runners.count) installed", symbol: "play.circle", tint: StatusTone.positive.text)
                     MetricTile(title: "Busy runners", value: "\(model.busyCount)", footnote: "with at least one active job", symbol: "bolt.fill", tint: StatusTone.active.text)
                     MetricTile(title: "Jobs recorded", value: "\(model.jobs.count)", footnote: "from local runner logs", symbol: "clock.arrow.circlepath", tint: RunningManStyle.accentText)
                     MetricTile(title: "Success rate", value: model.successRate.map { "\(Int(($0 * 100).rounded()))%" } ?? "—", footnote: "of completed jobs", symbol: "checkmark.seal", tint: StatusTone.positive.text)
-                }.fixedSize(horizontal: false, vertical: true)
+                }
                 if !model.warnings.isEmpty {
                     Surface(padding: 12) {
                         HStack(alignment: .top, spacing: 10) {

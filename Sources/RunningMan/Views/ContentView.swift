@@ -2,6 +2,8 @@ import SwiftUI
 import RunningManCore
 
 struct ContentView: View {
+    /// Fits half of a 1920-pt-wide display and a quarter of a 1080-pt-tall one.
+    static let minimumSize = CGSize(width: 800, height: 500)
     @Environment(AppModel.self) private var model
     @Environment(AppUpdateChecker.self) private var updates
     var body: some View {
@@ -50,7 +52,8 @@ struct ContentView: View {
                         prompt: model.section == .history ? "Search job history" : model.section == .workload ? "Search queues or scopes" : model.section == .cleanup ? "Search cleanup reports" : "Find a runner")
         }
         .tint(RunningManStyle.accent)
-        .frame(minWidth: 1000, minHeight: 650)
+        // The runner list and detail, the metric rows and the filters adapt to the narrower space.
+        .frame(minWidth: Self.minimumSize.width, minHeight: Self.minimumSize.height)
         // A sheet does not inherit the tint above, so each presented root sets its own.
         .sheet(isPresented: $model.showingNewRunner) { NewRunnerSheet().environment(model).tint(RunningManStyle.accent) }
         .sheet(isPresented: $model.showingForgejoConnection) { ForgejoConnectionSheet().environment(model).tint(RunningManStyle.accent) }

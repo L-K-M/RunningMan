@@ -15,11 +15,15 @@ struct HistoryView: View {
         let groups = Self.dayGroups(jobs)
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 7) {
-                outcomeChip(nil, title: "All jobs")
-                outcomeChip(.running, title: "Running")
-                outcomeChip(.success, title: "Success")
-                outcomeChip(.failure, title: "Failed")
-                outcomeChip(.cancelled, title: "Cancelled")
+                // Chips while they fit on one line; a narrow window offers the same choices as a menu.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 7) {
+                        ForEach(Self.outcomeFilters, id: \.title) { outcomeChip($0.outcome, title: $0.title) }
+                    }.fixedSize()
+                    Picker("Outcome", selection: $outcome) {
+                        ForEach(Self.outcomeFilters, id: \.title) { Text($0.title).tag($0.outcome) }
+                    }.labelsHidden().controlSize(.small).fixedSize()
+                }
                 Spacer(minLength: 12)
                 Picker("Runner", selection: $runnerFilter) {
                     Text("All runners").tag("all")
@@ -67,6 +71,10 @@ struct HistoryView: View {
                 .padding(.horizontal, 28).padding(.vertical, 10)
         }
     }
+
+    private static let outcomeFilters: [(outcome: JobOutcome?, title: String)] = [
+        (nil, "All jobs"), (.running, "Running"), (.success, "Success"), (.failure, "Failed"), (.cancelled, "Cancelled"),
+    ]
 
     private func outcomeChip(_ value: JobOutcome?, title: String) -> some View {
         let selected = outcome == value

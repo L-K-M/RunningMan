@@ -121,4 +121,13 @@ final class DesignSystemTests: XCTestCase {
         let difference = abs(a - b)
         return min(difference, 360 - difference)
     }
+
+    func testMetricRowsFallBackToTwoColumnsWhenTilesGetTooNarrow() {
+        // Four 160 pt tiles and three 12 pt gaps need 676 pt.
+        XCTAssertEqual(MetricRow.columns(for: 4, width: 676, spacing: 12, minimumTileWidth: 160), 4)
+        XCTAssertEqual(MetricRow.columns(for: 4, width: 675, spacing: 12, minimumTileWidth: 160), 2)
+        XCTAssertEqual(MetricRow.columns(for: 4, width: 0, spacing: 12, minimumTileWidth: 160), 2)
+        XCTAssertEqual(MetricRow.columns(for: 2, width: 100, spacing: 12, minimumTileWidth: 160), 2)
+        XCTAssertEqual(MetricRow.columns(for: 0, width: 800, spacing: 12, minimumTileWidth: 160), 1)
+    }
 }
