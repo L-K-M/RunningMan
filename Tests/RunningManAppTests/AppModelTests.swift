@@ -129,8 +129,14 @@ final class AppModelTests: XCTestCase {
         // A quote after a redacted value and a truncated quoted assignment both broke the old
         // whole-file pass, which consumed the escaping backslash of the encoded quote.
         let log = "[2026-10-16 10:00:00Z INFO Worker] token=abc\" done\nclone https://deploy:abc@forge.example/example/desktop.git\nexport RUNNER_TOKEN=\""
-        let data = try AppModel.diagnosticsReportData(generatedAt: start, runners: [RunnerSnapshot(runner: runner, status: .idle)],
-            jobs: [job], events: [event], cleanup: [cleanup], logs: [runner.id: log], warnings: ["Could not read token=abc"])
+        // Links without credentials must survive the export unchanged.
+        let safeRunner = InstalledRunner(name: "mac", directory: URL(fileURLWithPath: "/synthetic/safe"),
+            githubURL: URL(string: "https://github.com/example/desktop"))
+        let safeJob = RunnerJob(id: "safe", runnerID: safeRunner.id, name: "Build",
+            runURL: URL(string: "https://github.com/example/desktop/actions/runs/2"), startedAt: start)
+        let data = try AppModel.diagnosticsReportData(generatedAt: start,
+            runners: [RunnerSnapshot(runner: runner, status: .idle), RunnerSnapshot(runner: safeRunner, status: .idle)],
+            jobs: [job, safeJob], events: [event], cleanup: [cleanup], logs: [runner.id: log], warnings: ["Could not read token=abc"])
 
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertFalse(text.contains("abc"), text)
@@ -138,5 +144,9 @@ final class AppModelTests: XCTestCase {
         let logs = try XCTUnwrap(report["logs"] as? [String: String])
         XCTAssertEqual(logs[runner.id], "[2026-10-16 10:00:00Z INFO Worker] token=[REDACTED]\" done\nclone https://[REDACTED]@forge.example/example/desktop.git\nexport RUNNER_TOKEN=\"")
         XCTAssertEqual(report["warnings"] as? [String], ["Could not read token=[REDACTED]"])
+        XCTAssertTrue(text.contains("https:\\/\\/github.com\\/example\\/desktop\\/actions\\/runs\\/2"), text)
+        let runners = try XCTUnwrap(report["runners"] as? [[String: Any]])
+        let urls = runners.compactMap { ($0["runner"] as? [String: Any])?["githubURL"] as? String }
+        XCTAssertEqual(urls, ["https://github.com/example/desktop"])
     }
 }

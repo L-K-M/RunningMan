@@ -175,4 +175,10 @@ final class SecretRedactorTests: XCTestCase {
     private func assertUnchanged(_ inputs: [String], file: StaticString = #filePath, line: UInt = #line) {
         for input in inputs { XCTAssertEqual(SecretRedactor.redact(input), input, file: file, line: line) }
     }
+
+    func testSchemeWordDoesNotShieldACredentialValue() {
+        XCTAssertEqual(SecretRedactor.redact("token: Basic dXNlcjpwYXNzd29yZA=="), "token: [REDACTED]")
+        XCTAssertEqual(SecretRedactor.redact("FORGEJO_TOKEN=token 0123456789abcdef0123"), "FORGEJO_TOKEN=[REDACTED]")
+        XCTAssertEqual(SecretRedactor.redact("max_tokens: 512"), "max_tokens: 512")
+    }
 }

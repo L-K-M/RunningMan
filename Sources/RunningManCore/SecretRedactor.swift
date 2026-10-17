@@ -59,8 +59,9 @@ public enum SecretRedactor {
              requiredWords: ["authorization", "cookie"]),
         // key = "value", 'key': 'value' and key: value. Unquoted values need an unquoted key, so JSON
         // flags such as "hasPassword": true survive. Skipping an existing marker keeps redaction
-        // idempotent and leaves "[REDACTED PRIVATE KEY]" whole.
-        Rule(#"(?i)(\#(credentialName))(?:([\"']?\s*[:=]\s*)\#(quotedValue)|(\s*[:=]\s*)(?!\[REDACTED[\] ])[^\s\"',;{}]+)"#,
+        // idempotent and leaves "[REDACTED PRIVATE KEY]" whole. A scheme word (token: Basic x)
+        // is consumed with its value so it cannot shield the credential.
+        Rule(#"(?i)(\#(credentialName))(?:([\"']?\s*[:=]\s*)\#(quotedValue)|(\s*[:=]\s*)(?!\[REDACTED[\] ])(?:(?:basic|bearer|token)[ \t]+)?[^\s\"',;{}]+)"#,
              "$1$2$5$3$4[REDACTED]$3$4", requiredWords: credentialWords)
     ]
 
