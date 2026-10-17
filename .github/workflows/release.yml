@@ -31,8 +31,6 @@ jobs:
     name: Build and attach RunningMan.app
     runs-on: macos-15
     timeout-minutes: 30
-    outputs:
-      smoke: ${{ steps.smoke.outcome }}
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
     steps:
@@ -120,18 +118,12 @@ jobs:
       - name: Render isolated preview
         # A smoke check of the demo-mode screenshots, run against the bundle
         # still in dist/. A stalled capture must not keep the assets from
-        # shipping, so it runs last and bounded. Its outcome gates only the
-        # update announcement (publish-update-manifest below).
+        # shipping, so it runs after the upload and bounded; the last step
+        # fails the job when it did not pass, which withholds the announcement.
         id: smoke
         continue-on-error: true
         timeout-minutes: 5
         run: scripts/smoke-test.sh
-
-      - name: Report a failed preview
-        if: steps.smoke.outcome != 'success'
-        run: |
-          echo "::warning::The preview smoke test did not pass; the assets are attached, but the update manifest will not announce $TAG."
-          echo "The preview smoke test did not pass, so installed apps are not told about $TAG. Fix the preview, then rerun this workflow for the tag." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload preview screenshots
         # Diagnostic evidence only; an artifact-service error must not fail the job.
@@ -144,12 +136,18 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Fail when the preview did not pass
+        if: steps.smoke.outcome != 'success'
+        run: |
+          echo "::error::The preview smoke test did not pass. The assets are attached, but installed apps are not told about $TAG."
+          echo "The preview smoke test did not pass, so the update manifest was not published for $TAG. Fix the preview, then rerun this workflow for the tag." >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
   publish-update-manifest:
     name: Publish update manifest
     # Only after the release exists with every asset attached and the
-    # preview smoke test launched the app successfully.
+    # preview smoke test passed (the app job fails otherwise).
     needs: app
-    if: needs.app.outputs.smoke == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
