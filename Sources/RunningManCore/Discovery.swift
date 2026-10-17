@@ -5,6 +5,15 @@ import Foundation
 /// opens its credential files.
 public actor RunnerDiscovery {
     public static let systemDaemonsDirectory = URL(fileURLWithPath: "/Library/LaunchDaemons", isDirectory: true)
+    /// Standard home folders the shallow home scan never looks inside. Touching
+    /// files in Desktop, Documents or Downloads makes macOS ask whether RunningMan
+    /// may access that folder, and an ad-hoc signed build loses the grant with
+    /// every update. The other folders do not hold runner installations. Imported
+    /// folders and folders referenced by a service are still discovered.
+    private static let skippedHomeFolders: Set<String> = ["Applications", "Desktop", "Documents", "Downloads",
+        "Library", "Movies", "Music", "Pictures", "Public"]
+    /// Bounds every folder listing so one crowded folder cannot stall a refresh.
+    private static let listingLimit = 512
     private let homeDirectory: URL
     private let systemDaemonsDirectory: URL?
     private let userName: String
@@ -27,10 +36,18 @@ public actor RunnerDiscovery {
             homeDirectory.appendingPathComponent("Library/Application Support/RunningMan/Runners")]
         for root in rootFolders {
             candidates.insert(root)
-            guard let children = try? fileManager.contentsOfDirectory(at: root,
-                includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { continue }
-            for child in children.prefix(512) {
-                if (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            guard var children = try? fileManager.contentsOfDirectory(at: root,
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { continue }
+            let isHome = root == homeDirectory
+            if isHome { children.removeAll { Self.skippedHomeFolders.contains($0.lastPathComponent) } }
+            for child in limitedListing(children, of: root, warnings: &warnings) {
+                guard let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { continue }
+                // isDirectory describes a link itself. Runner folders may link to
+                // another volume; links directly in the home folder are not followed
+                // because they often lead into cloud storage or protected folders.
+                let isLinkedDirectory = !isHome && values.isSymbolicLink == true
+                    && (try? child.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                if values.isDirectory == true || isLinkedDirectory {
                     candidates.insert(child.standardizedFileURL)
                 }
             }
@@ -40,7 +57,7 @@ public actor RunnerDiscovery {
         var forgejoServices: [URL: InstalledRunner] = [:]
         if let files = try? fileManager.contentsOfDirectory(at: agents,
             includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-            for file in files.filter({ $0.pathExtension == "plist" }).prefix(512) {
+            for file in limitedListing(files.filter({ $0.pathExtension == "plist" }), of: agents, warnings: &warnings) {
                 guard let plist = Self.plist(at: file), let label = plist["Label"] as? String else { continue }
                 if let forgejo = Self.forgejoService(plist) {
                     candidates.insert(forgejo.directory)
@@ -71,7 +88,7 @@ public actor RunnerDiscovery {
         var systemServices: [URL: InstalledRunner] = [:]
         if let systemDaemonsDirectory, let files = try? fileManager.contentsOfDirectory(at: systemDaemonsDirectory,
             includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-            for file in files.filter({ $0.pathExtension == "plist" }).prefix(512) {
+            for file in limitedListing(files.filter({ $0.pathExtension == "plist" }), of: systemDaemonsDirectory, warnings: &warnings) {
                 guard let plist = Self.plist(at: file), plist["UserName"] as? String == userName,
                       var forgejo = Self.forgejoService(plist), systemServices[forgejo.directory] == nil else { continue }
                 forgejo.serviceDomain = .system
@@ -156,6 +173,22 @@ public actor RunnerDiscovery {
             }
         }
         return DiscoveryResult(runners: runners.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }, warnings: warnings)
+    }
+
+    /// Returns at most `listingLimit` entries in name order, so the inspected subset
+    /// stays the same between refreshes, and warns when the folder holds more.
+    private func limitedListing(_ entries: [URL], of folder: URL, warnings: inout [String]) -> ArraySlice<URL> {
+        if entries.count > Self.listingLimit {
+            warnings.append("Discovery inspected only the first \(Self.listingLimit) entries in \(displayName(of: folder)). Use Import existing runner for any runner that does not appear.")
+        }
+        return entries.sorted { $0.lastPathComponent < $1.lastPathComponent }.prefix(Self.listingLimit)
+    }
+
+    /// Names a folder in a warning without exposing the account's home path.
+    private func displayName(of folder: URL) -> String {
+        let home = homeDirectory.path, path = folder.standardizedFileURL.path
+        if path == home { return "your home folder" }
+        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
     }
 
     private static func workDirectory(_ value: String?, in directory: URL) -> URL {
