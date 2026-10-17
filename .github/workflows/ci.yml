@@ -33,11 +33,8 @@ jobs:
         run: |
           lipo "dist/RunningMan.app/Contents/MacOS/RunningMan" -verify_arch arm64 x86_64
       - name: Render isolated preview
-        # The demo-mode snapshot needs a real window server; it captures the four
-        # views in ~6s on a desktop but currently stalls on the hosted runner.
-        # Bounded and non-blocking so it cannot hold CI red while that is sorted;
-        # the screenshots upload step still publishes whatever it produced.
-        continue-on-error: true
+        # Blocking, because the release workflow runs the same step. The script
+        # fails after two minutes if the capture stalls; this is a backstop.
         timeout-minutes: 4
         run: scripts/smoke-test.sh
       - name: Upload app
