@@ -158,6 +158,7 @@ final class AppModel {
             do { jobs = try await history.load() } catch { warnings = [Self.message(error)] }
             events = await eventStore.load()
             observedEventKeys = Set(events.map(ActivityIdentity.init))
+            if let notice = await history.takeRecoveryNotice() { record(title: "Could not read all saved job history", detail: notice, kind: .warning) }
             await refresh()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
