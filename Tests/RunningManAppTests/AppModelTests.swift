@@ -97,6 +97,23 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.runners[0].status, .unknown)
     }
 
+    /// The app delegate now starts monitoring at every launch; the preview
+    /// workspace must still never load saved history or poll the machine.
+    @MainActor func testDemoMonitoringStaysOffline() async throws {
+        let model = AppModel(demoMode: true)
+        let jobs = model.jobs, events = model.events, updated = model.lastUpdated
+        model.startMonitoring()
+        model.mainWindowVisible = true
+        model.menuPanelVisible = true
+        model.mainWindowVisible = false
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(model.jobs, jobs)
+        XCTAssertEqual(model.events.map(\.title), events.map(\.title))
+        XCTAssertEqual(model.lastUpdated, updated)
+        XCTAssertFalse(model.isRefreshing)
+        model.stopMonitoring()
+    }
+
     func testHistoricalActivityDeduplicatesAcrossRelaunchAndDatePrecision() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

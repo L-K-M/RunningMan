@@ -95,7 +95,13 @@ final class AppModel {
     @ObservationIgnored private var logTails: [String: String] = [:]
     @ObservationIgnored private var importedDirectories: [URL] = []
     @ObservationIgnored private var observedEventKeys: Set<ActivityIdentity> = []
+    @ObservationIgnored private let pollingTimer = PollingTimer()
     @ObservationIgnored var showMainWindow: (() -> Void)?
+    /// The main window is on screen (not closed, minimised, hidden or fully covered).
+    /// Set by the window scene and the app delegate; with `menuPanelVisible` it sets the polling cadence.
+    @ObservationIgnored var mainWindowVisible = false { didSet { visibilityChanged(wasVisible: oldValue || menuPanelVisible) } }
+    /// The menu bar panel is open.
+    @ObservationIgnored var menuPanelVisible = false { didSet { visibilityChanged(wasVisible: mainWindowVisible || oldValue) } }
 
     static var supportDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -158,11 +164,22 @@ final class AppModel {
             observedEventKeys = Set(events.map(ActivityIdentity.init))
             await refresh()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3))
+                await pollingTimer.sleep(for: nextPollInterval())
                 guard !Task.isCancelled else { break }
                 if refreshAutomatically || !drainingRunnerIDs.isEmpty || keepAwakeWhileBusy { await refresh() }
             }
         }
+    }
+
+    private func nextPollInterval() -> Duration {
+        PollingCadence.pollInterval(uiVisible: mainWindowVisible || menuPanelVisible, anyBusy: busyCount > 0,
+                                    anyDraining: !drainingRunnerIDs.isEmpty, keepAwake: keepAwakeWhileBusy,
+                                    lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled, anyRunning: runningCount > 0)
+    }
+
+    /// Opening the window or the menu ends a long background wait at once.
+    private func visibilityChanged(wasVisible: Bool) {
+        if mainWindowVisible || menuPanelVisible, !wasVisible { pollingTimer.wake() }
     }
 
     func stopMonitoring() {
