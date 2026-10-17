@@ -148,6 +148,46 @@ final class AppModelTests: XCTestCase {
                                                    inProgress: []), [])
     }
 
+    @MainActor func testConfirmedStopDoesNotRunWhileAnotherActionOwnsTheRunner() {
+        let model = AppModel(demoMode: true)
+        let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
+        model.perform(.stop, on: busy)
+        XCTAssertNotNil(model.confirmation)
+        model.busyRunnerIDs.insert(busy.id)
+        model.confirmPendingAction()
+        XCTAssertNil(model.confirmation)
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(model.runners.first { $0.id == busy.id }?.status, .busy)
+        XCTAssertTrue(model.busyRunnerIDs.contains(busy.id))
+    }
+
+    @MainActor func testConfirmedActionForRemovedRunnerReportsErrorAndDoesNothing() {
+        let model = AppModel(demoMode: true)
+        let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
+        model.perform(.delete, on: busy)
+        XCTAssertNotNil(model.confirmation)
+        model.runners.removeAll { $0.id == busy.id }
+        let remaining = model.runners
+        let eventCount = model.events.count
+        model.confirmPendingAction()
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(model.runners, remaining)
+        XCTAssertEqual(model.events.count, eventCount)
+    }
+
+    @MainActor func testClearHistoryStillRequiresConfirmation() async throws {
+        let model = AppModel(demoMode: true)
+        XCTAssertFalse(model.jobs.isEmpty)
+        model.clearHistory()
+        XCTAssertNotNil(model.confirmation)
+        model.cancelPendingAction()
+        XCTAssertFalse(model.jobs.isEmpty)
+        model.clearHistory()
+        model.confirmPendingAction()
+        for _ in 0..<50 where !model.jobs.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(model.jobs.isEmpty)
+    }
+
     func testDrainFailureRetriesBackOffAndCapAtFiveMinutes() {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         var failure: DrainFailure?

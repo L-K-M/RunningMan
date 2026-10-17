@@ -43,6 +43,19 @@ struct RunnerConfirmation: Identifiable {
     let buttonTitle: String
 }
 
+/// A runner action waiting for confirmation. It keeps the runner's id rather than a snapshot, so
+/// confirming re-checks the runner's current state.
+struct PendingRunnerAction: Equatable {
+    let action: RunnerAction
+    let runnerID: String
+    let force: Bool
+}
+
+enum PendingConfirmation: Equatable {
+    case runner(PendingRunnerAction)
+    case clearHistory
+}
+
 @MainActor @Observable
 final class AppModel {
     var runners: [RunnerSnapshot] = []
@@ -116,7 +129,7 @@ final class AppModel {
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var workloadTask: Task<WorkloadReport, Never>?
     @ObservationIgnored private var lastWorkloadAttempt: Date?
-    @ObservationIgnored private var pendingAction: (() -> Void)?
+    @ObservationIgnored private var pendingConfirmation: PendingConfirmation?
     @ObservationIgnored private var sleepPrevention: Process?
     @ObservationIgnored private var logTails: [String: String] = [:]
     @ObservationIgnored private var importedDirectories: [URL] = []
@@ -273,7 +286,7 @@ final class AppModel {
     func processDrainRequests(now: Date = Date()) {
         for id in Self.endedDrainRequests(drainingRunnerIDs, runners: runners, inProgress: busyRunnerIDs).sorted() {
             drainingRunnerIDs.remove(id)
-            record(title: "Stop after job ended: \(drainRunnerName(id)) is no longer running", runnerID: id)
+            record(title: "Stop after job ended: \(runnerDisplayName(id)) is no longer running", runnerID: id)
         }
         for runner in runners where drainingRunnerIDs.contains(runner.id) && runner.status == .idle && !busyRunnerIDs.contains(runner.id) {
             if let failure = drainFailures[runner.id], failure.retryDate > now { continue }
@@ -284,7 +297,7 @@ final class AppModel {
     /// Automatic stops fail quietly: each distinct reason is logged once per runner, retries back off,
     /// and the request ends with a warning after `DrainFailure.attemptLimit` attempts.
     func noteAutomaticStopFailure(runnerID: String, message: String, at date: Date = Date()) {
-        let name = drainRunnerName(runnerID)
+        let name = runnerDisplayName(runnerID)
         guard drainingRunnerIDs.contains(runnerID) else {
             record(title: "Automatic stop failed", runnerID: runnerID, detail: "\(name): \(message)", kind: .failure)
             return
@@ -304,7 +317,7 @@ final class AppModel {
     }
 
     /// Falls back to the folder name for a runner that is no longer discovered.
-    private func drainRunnerName(_ id: String) -> String {
+    private func runnerDisplayName(_ id: String) -> String {
         runners.first { $0.id == id }?.runner.name ?? URL(fileURLWithPath: id).lastPathComponent
     }
 
@@ -376,26 +389,46 @@ final class AppModel {
             confirmation = RunnerConfirmation(title: "Remove \(runner.runner.name)?",
                 message: "Unregisters this runner from \(runner.runner.provider.title) and removes its login service. Installation files and job history are kept. An active job will be interrupted.",
                 buttonTitle: "Remove runner")
-            pendingAction = { [weak self] in self?.runAction(action, on: runner, force: true) }
+            pendingConfirmation = .runner(PendingRunnerAction(action: action, runnerID: runner.id, force: true))
         } else if (runner.status == .busy || runner.status == .unknown) && (action == .stop || action == .disable) {
             confirmation = RunnerConfirmation(title: runner.status == .busy ? "Interrupt the active job?" : "Stop with activity unverified?",
                 message: runner.status == .busy ? "\(runner.runner.name) is building right now. This will stop the runner and interrupt its job. Choose “Stop when idle” to let it finish." : "RunningMan cannot verify whether \(runner.runner.name) has active jobs. Stopping may interrupt work.",
                 buttonTitle: action == .disable ? "Disable and interrupt" : "Stop and interrupt")
-            pendingAction = { [weak self] in self?.runAction(action, on: runner, force: true) }
+            pendingConfirmation = .runner(PendingRunnerAction(action: action, runnerID: runner.id, force: true))
         } else { runAction(action, on: runner) }
     }
 
     func confirmPendingAction() {
-        let action = pendingAction
+        let pending = pendingConfirmation
         confirmation = nil
-        pendingAction = nil
-        action?()
+        pendingConfirmation = nil
+        switch pending {
+        case .runner(let request): runConfirmed(request)
+        case .clearHistory: clearHistoryConfirmed()
+        case nil: break
+        }
     }
-    func cancelPendingAction() { confirmation = nil; pendingAction = nil }
+    func cancelPendingAction() { confirmation = nil; pendingConfirmation = nil }
+
+    /// The dialog may have stayed open across refreshes and other actions, so the runner's current
+    /// snapshot decides, not the one shown when it opened.
+    private func runConfirmed(_ request: PendingRunnerAction) {
+        guard let runner = runners.first(where: { $0.id == request.runnerID }) else {
+            errorMessage = "\(runnerDisplayName(request.runnerID)) is no longer installed. Nothing was changed."
+            return
+        }
+        guard !busyRunnerIDs.contains(runner.id) else {
+            errorMessage = "\(runner.runner.name) is still busy with another action. Nothing was changed; try again when it finishes."
+            return
+        }
+        runAction(request.action, on: runner, force: request.force)
+    }
 
     private func runAction(_ action: RunnerAction, on runner: RunnerSnapshot, force: Bool = false, origin: ActionOrigin = .user) {
-        if demoMode { simulate(action, runner: runner); return }
-        busyRunnerIDs.insert(runner.id)
+        // Two operations must never run on one runner at once; the first one's completion would
+        // re-enable controls while the other is still running.
+        guard busyRunnerIDs.insert(runner.id).inserted else { return }
+        if demoMode { simulate(action, runner: runner); busyRunnerIDs.remove(runner.id); return }
         Task {
             defer { busyRunnerIDs.remove(runner.id) }
             do {
@@ -648,12 +681,12 @@ final class AppModel {
         confirmation = RunnerConfirmation(title: "Clear saved job history?",
             message: "Clears RunningMan’s saved history. Runner diagnostic files are kept; jobs still present in those files may appear again after refreshing.",
             buttonTitle: "Clear history")
-        pendingAction = { [weak self] in
-            guard let self else { return }
-            Task {
-                do { if !self.demoMode { try await self.history.clear() }; self.jobs = []; self.record(title: "Saved job history cleared") }
-                catch { self.errorMessage = Self.message(error) }
-            }
+        pendingConfirmation = .clearHistory
+    }
+    private func clearHistoryConfirmed() {
+        Task {
+            do { if !demoMode { try await history.clear() }; jobs = []; record(title: "Saved job history cleared") }
+            catch { errorMessage = Self.message(error) }
         }
     }
 
