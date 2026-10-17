@@ -166,8 +166,11 @@ final class AppModel {
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }
     }
-    var runningCount: Int { runners.filter { $0.status.isRunning || $0.processID != nil }.count }
+    var runningCount: Int { runners.filter(\.isOnline).count }
     var busyCount: Int { runners.filter { $0.status == .busy }.count }
+    /// See `RunnerSnapshot.needsAttention`.
+    var attentionCount: Int { runners.filter(\.needsAttention).count }
+    var menuBarRunners: [RunnerSnapshot] { Self.menuBarOrder(runners) }
     var startsAtLoginCount: Int { runners.filter { $0.startsAtLogin && $0.isEnabled }.count }
     var successRate: Double? {
         completedJobCount == 0 ? nil : Double(successfulJobs) / Double(completedJobCount)
@@ -177,6 +180,16 @@ final class AppModel {
     func jobCount(for runnerID: String) -> Int { jobsByRunner[runnerID]?.count ?? 0 }
     /// Passes started by the refresh coalescer; a test seam.
     var refreshPassCount: Int { refreshes.passCount }
+
+    /// The menu bar panel's order: runners that need attention, then busy ones, online
+    /// ones with unverified activity, idle, stopped and disabled ones; by name within each.
+    nonisolated static func menuBarOrder(_ runners: [RunnerSnapshot]) -> [RunnerSnapshot] {
+        runners.sorted {
+            if $0.menuBarRank != $1.menuBarRank { return $0.menuBarRank < $1.menuBarRank }
+            let order = $0.runner.name.localizedStandardCompare($1.runner.name)
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+        }
+    }
 
     func startMonitoring() {
         guard pollingTask == nil, !demoMode else { return }
@@ -1000,6 +1013,35 @@ final class AppModel {
         }
         return JobStepLog(jobID: jobID, runnerID: runnerID, isFinished: isFinished, hasOutput: true,
                           isTruncated: false, revision: 1, steps: built)
+    }
+}
+
+extension RunnerSnapshot {
+    /// The runner process is alive, with or without a job.
+    var isOnline: Bool { status.isRunning || processID != nil }
+
+    /// A state RunningMan could not read, or one that needs a person. A running Forgejo
+    /// daemon whose job activity is unverified (no API access, or server monitoring off)
+    /// is unknown by design rather than at fault, so it does not count.
+    var needsAttention: Bool {
+        switch status {
+        case .attention: return true
+        case .unknown: return !(runner.provider == .forgejo && processID != nil)
+        case .idle, .busy, .stopped, .disabled: return false
+        }
+    }
+
+    fileprivate var menuBarRank: Int {
+        if needsAttention { return 0 }
+        switch status {
+        case .attention: return 0
+        case .busy: return 1
+        // Online, activity unverified: possibly busy.
+        case .unknown: return 2
+        case .idle: return 3
+        case .stopped: return 4
+        case .disabled: return 5
+        }
     }
 }
 

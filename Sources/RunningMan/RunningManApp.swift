@@ -4,15 +4,20 @@ import SwiftUI
 
 @main
 struct RunningManApp: App {
-    @State private var model = AppModel()
+    @State private var model: AppModel
     @State private var updates = AppUpdateChecker()
+    /// Follows the model from outside it, so frame ticks re-render only the menu bar label.
+    @State private var menuBarAnimator: MenuBarAnimator
     @NSApplicationDelegateAdaptor(RunningManAppDelegate.self) private var delegate
 
     init() {
         let model = AppModel()
         // Before SwiftUI creates a window, so AppKit has saved nothing yet.
         if model.demoMode { DemoLayoutPreferences.record() }
+        let animator = MenuBarAnimator(motion: SnapshotCapture.destination == nil ? .animated : .still)
+        animator.follow(model)
         _model = State(initialValue: model)
+        _menuBarAnimator = State(initialValue: animator)
     }
 
     var body: some Scene {
@@ -48,11 +53,7 @@ struct RunningManApp: App {
         MenuBarExtra {
             RunnerMenuView().environment(model)
         } label: {
-            Label {
-                Text(model.busyCount > 0 ? "\(model.busyCount) building" : "RunningMan")
-            } icon: {
-                Image(systemName: model.busyCount > 0 ? "figure.run.circle.fill" : "figure.run")
-            }
+            MenuBarLabel(animator: menuBarAnimator)
         }
         .menuBarExtraStyle(.window)
     }
