@@ -59,7 +59,9 @@ open dist/RunningMan.app
 
 ## Existing runners
 
-Open RunningMan. It checks runner installation folders immediately below your home directory, its own managed runner directory, your user LaunchAgents, and Forgejo system LaunchDaemons that run as your account. Use **Import existing runner…** for installations elsewhere.
+Open RunningMan. It checks runner installation folders immediately below your home directory, `~/actions-runners` and `~/GitHubRunners`, its own managed runner directory, folders referenced by your user LaunchAgents, Forgejo system LaunchDaemons that run as your account, and folders you imported. Entries in `~/actions-runners`, `~/GitHubRunners` and the managed runner directory can be symbolic links to another volume. Use **Import existing runner…** for installations elsewhere.
+
+RunningMan does not look inside the standard folders in your home directory (Applications, Desktop, Documents, Downloads, Library, Movies, Music, Pictures and Public), so macOS does not ask you for access to them. Import a runner stored in Documents, Desktop or Downloads with **Import existing runner…**, unless a user LaunchAgent already refers to it. Each folder listing is limited to 512 entries; RunningMan warns you when a folder has more.
 
 Discovery reads non-secret runner metadata and local diagnostics. It never executes a discovered runner or reads its credential files. Opening the app does not start, stop or reconfigure runners.
 
