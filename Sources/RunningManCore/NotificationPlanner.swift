@@ -62,9 +62,10 @@ public enum NotificationPlanner {
             return kind(for: job.outcome, preferences: preferences) != nil
         }
         guard !finished.isEmpty else { return [] }
-        // Only a record seen unfinished (or not at all) that has now finished is news.
+        // Only a record seen unfinished (or not at all) that has now finished is news. So is a
+        // finished job whose unrecognised result a later log line confirmed.
         let candidateIDs = Set(finished.map(\.id))
-        let finishedBefore = Set(previous.lazy.filter { $0.finishedAt != nil && candidateIDs.contains($0.id) }.map(\.id))
+        let finishedBefore = Set(previous.lazy.filter { $0.finishedAt != nil && $0.outcome != .unknown && candidateIDs.contains($0.id) }.map(\.id))
         let runnerNames = Dictionary(runners.map { ($0.id, $0.runner.name) }, uniquingKeysWith: { _, latest in latest })
         return finished.sorted { ($0.finishedAt ?? now, $0.id) < ($1.finishedAt ?? now, $1.id) }.compactMap { job in
             guard !finishedBefore.contains(job.id), let kind = kind(for: job.outcome, preferences: preferences) else { return nil }

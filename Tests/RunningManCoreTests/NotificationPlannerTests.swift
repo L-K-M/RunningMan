@@ -45,6 +45,16 @@ final class NotificationPlannerTests: XCTestCase {
         XCTAssertEqual(item.jobID, failed.id)
     }
 
+    func testResultConfirmedAfterTheJobFinishedNotifies() {
+        let unrecognised = job(finished: 200, outcome: .unknown)
+        let confirmed = job(finished: 200, outcome: .failure)
+        XCTAssertTrue(plan(previousJobs: [job()], currentJobs: [unrecognised]).isEmpty)
+        XCTAssertEqual(plan(previousJobs: [unrecognised], currentJobs: [confirmed], now: 303).map(\.kind), [.jobFailed])
+        // A confirmed result that is later corrected is not news again.
+        let corrected = job(finished: 200, outcome: .cancelled)
+        XCTAssertTrue(plan(previousJobs: [confirmed], currentJobs: [corrected], now: 306).isEmpty)
+    }
+
     func testRepeatedPlanningDoesNotDuplicate() {
         let running = job()
         let failed = job(finished: 200, outcome: .failure)
