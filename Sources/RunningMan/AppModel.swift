@@ -18,11 +18,85 @@ enum AppSection: String, CaseIterable, Identifiable {
 
 enum RunnerAction { case start, stop, enable, disable, drain, delete }
 
+/// Who asked for an action. Only user-initiated failures raise the alert, which brings the window forward.
+enum ActionOrigin { case user, automatic }
+
+/// The last failed automatic stop-after-job attempt for one runner. Retries back off so a stop
+/// that keeps failing neither floods the activity log nor runs on every poll.
+struct DrainFailure: Equatable {
+    static let attemptLimit = 5
+    let attempts: Int
+    let message: String
+    let date: Date
+    /// 30 s after the first failure, doubling up to 5 minutes.
+    var retryDate: Date { date.addingTimeInterval(min(30 * pow(2, Double(max(attempts, 1) - 1)), 300)) }
+    var exhaustsAttempts: Bool { attempts >= Self.attemptLimit }
+    static func after(_ previous: DrainFailure?, message: String, at date: Date) -> DrainFailure {
+        DrainFailure(attempts: (previous?.attempts ?? 0) + 1, message: message, date: date)
+    }
+}
+
 struct RunnerConfirmation: Identifiable {
     let id = UUID()
     let title: String
     let message: String
     let buttonTitle: String
+}
+
+/// A runner action waiting for confirmation. It keeps the runner's id rather than a snapshot, so
+/// confirming re-checks the runner's current state.
+struct PendingRunnerAction: Equatable {
+    let action: RunnerAction
+    let runnerID: String
+    let force: Bool
+}
+
+enum PendingConfirmation: Equatable {
+    case runner(PendingRunnerAction)
+    case clearHistory
+}
+
+/// Keeps stop-after-job requests across launches, each with the process it was made for. RunningMan
+/// must be running to act on them. After launch a request applies only while that process still runs;
+/// requests whose runner is gone, stopped or restarted end instead.
+struct DrainRequestStore {
+    static let key = "drainRequests"
+    let defaults: UserDefaults
+    /// When the Mac booted. A process id names a run only within one boot.
+    let bootTime: TimeInterval?
+
+    init(defaults: UserDefaults, bootTime: TimeInterval? = DrainRequestStore.currentBootTime()) {
+        self.defaults = defaults
+        self.bootTime = bootTime
+    }
+
+    /// Runner ids with the process each request was made for. Runner ids are standardized installation
+    /// paths; anything else cannot match a runner. A request saved before the Mac last booted, or without
+    /// a known process, comes back with nil, which matches no running process.
+    func load() -> [String: Int32?] {
+        guard let stored = defaults.dictionary(forKey: Self.key),
+              let processes = stored["processes"] as? [String: Int] else { return [:] }
+        let sameBoot = bootTime != nil && stored["bootTime"] as? Double == bootTime
+        var requests: [String: Int32?] = [:]
+        for (id, processID) in processes where id.hasPrefix("/") {
+            requests.updateValue(sameBoot && processID > 0 ? Int32(exactly: processID) : nil, forKey: id)
+        }
+        return requests
+    }
+
+    func save(_ requests: [String: Int32?]) {
+        guard !requests.isEmpty else { defaults.removeObject(forKey: Self.key); return }
+        var stored: [String: Any] = ["processes": requests.mapValues { Int($0 ?? 0) }]
+        if let bootTime { stored["bootTime"] = bootTime }
+        defaults.set(stored, forKey: Self.key)
+    }
+
+    static func currentBootTime() -> TimeInterval? {
+        var boot = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &boot, &size, nil, 0) == 0 else { return nil }
+        return TimeInterval(boot.tv_sec) + TimeInterval(boot.tv_usec) / 1_000_000
+    }
 }
 
 @MainActor @Observable
@@ -59,6 +133,7 @@ final class AppModel {
             if !remoteMonitoringEnabled {
                 workloadTask?.cancel()
                 workload = nil
+                cancelForgejoDrainRequests()
             }
         }
     }
@@ -68,7 +143,17 @@ final class AppModel {
     /// Set only by `refreshNow()`, so background polls never animate the toolbar.
     private(set) var isManualRefreshing = false
     var busyRunnerIDs: Set<String> = []
-    var drainingRunnerIDs: Set<String> = []
+    var drainingRunnerIDs: Set<String> = [] {
+        didSet {
+            if drainingRunnerIDs != oldValue { bindDrainRequests() }
+            // Failure records belong to a request; ending the request ends its retry state.
+            if drainFailures.keys.contains(where: { !drainingRunnerIDs.contains($0) }) {
+                drainFailures = drainFailures.filter { drainingRunnerIDs.contains($0.key) }
+            }
+            drainUnknownSince = drainUnknownSince.filter { drainingRunnerIDs.contains($0.key) }
+        }
+    }
+    var drainFailures: [String: DrainFailure] = [:]
     var lastUpdated: Date?
     var logText = ""
     /// Steps and output of each GitHub runner's most recent job, by runner ID.
@@ -103,10 +188,12 @@ final class AppModel {
     @ObservationIgnored private let history: RunnerHistoryStore
     @ObservationIgnored private let eventStore: ActivityStore
     @ObservationIgnored private let activitySamples: RunnerActivityStore
+    /// Nil in demo mode, which must not write preferences.
+    @ObservationIgnored private let drainRequestStore: DrainRequestStore?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var workloadTask: Task<WorkloadReport, Never>?
     @ObservationIgnored private var lastWorkloadAttempt: Date?
-    @ObservationIgnored private var pendingAction: (() -> Void)?
+    @ObservationIgnored private var pendingConfirmation: PendingConfirmation?
     @ObservationIgnored private var sleepPrevention: Process?
     @ObservationIgnored private var logTails: [String: String] = [:]
     @ObservationIgnored private var importedDirectories: [URL] = []
@@ -121,6 +208,16 @@ final class AppModel {
     @ObservationIgnored var mainWindowVisible = false { didSet { visibilityChanged(wasVisible: oldValue || menuPanelVisible) } }
     /// The menu bar panel is open.
     @ObservationIgnored var menuPanelVisible = false { didSet { visibilityChanged(wasVisible: mainWindowVisible || oldValue) } }
+    /// How long a busy demo runner takes to finish its job after stop-after-job; tests shorten it.
+    @ObservationIgnored var demoDrainDelay: Duration = .seconds(4)
+    /// The process each stop-after-job request was made for, saved with it across launches.
+    @ObservationIgnored private var drainProcesses: [String: Int32?] = [:]
+    /// Restored requests not yet compared with their runner's current process. Nothing acts on them until then.
+    @ObservationIgnored private var unconfirmedDrainRequests: Set<String> = []
+    /// When each requested runner's state became unverifiable, so the request cannot wait on it forever.
+    @ObservationIgnored private var drainUnknownSince: [String: Date] = [:]
+    /// How long a stop-after-job request waits for an unverifiable state to clear before it ends.
+    static let drainUnknownLimit: TimeInterval = 10 * 60
 
     static var supportDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -140,6 +237,7 @@ final class AppModel {
         history = RunnerHistoryStore(fileURL: Self.supportDirectory.appendingPathComponent("jobs.json"))
         eventStore = ActivityStore(url: Self.supportDirectory.appendingPathComponent("activity.json"))
         activitySamples = RunnerActivityStore(fileURL: Self.supportDirectory.appendingPathComponent("observed-activity.json"))
+        drainRequestStore = demoMode ? nil : DrainRequestStore(defaults: .standard)
         if demoMode {
             remoteMonitoringEnabled = true
             loadDemo()
@@ -152,7 +250,32 @@ final class AppModel {
             defaultForgejoServer = preferences.string(forKey: "defaultForgejoServer") ?? forgejoServers.first?.absoluteString ?? ""
             importedDirectories = (preferences.stringArray(forKey: "importedRunnerDirectories") ?? [])
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            restoreDrainRequests(drainRequestStore?.load() ?? [:])
         }
+    }
+
+    /// What quitting now would leave undone, or nil when RunningMan can quit without asking.
+    var quitWarning: (title: String, message: String)? {
+        demoMode ? nil : Self.quitWarning(isCreating: isCreating, actionsInProgress: busyRunnerIDs.count, drainRequests: drainingRunnerIDs.count)
+    }
+
+    nonisolated static func quitWarning(isCreating: Bool, actionsInProgress: Int, drainRequests: Int) -> (title: String, message: String)? {
+        var notes: [String] = []
+        if isCreating {
+            notes.append("A runner is being created. Quitting interrupts the setup and can leave an incomplete installation folder.")
+        }
+        if actionsInProgress > 0 {
+            notes.append(actionsInProgress == 1 ? "A runner action is still in progress and may not finish." : "\(actionsInProgress) runner actions are still in progress and may not finish.")
+        }
+        if drainRequests > 0 {
+            notes.append((drainRequests == 1 ? "1 runner is waiting to stop after its job." : "\(drainRequests) runners are waiting to stop after their jobs.")
+                + " RunningMan resumes these requests when you open it again unless a runner restarted in the meantime, but it must be running to stop the runners.")
+        }
+        guard !notes.isEmpty else { return nil }
+        let title = isCreating ? "Quit while a runner is being created?"
+            : drainRequests > 0 ? (drainRequests == 1 ? "Quit while a runner waits to stop?" : "Quit while runners wait to stop?")
+            : "Quit while a runner action is in progress?"
+        return (title, notes.joined(separator: "\n\n"))
     }
 
     var selectedRunner: RunnerSnapshot? { runners.first { $0.id == selectedRunnerID } }
@@ -301,10 +424,8 @@ final class AppModel {
                        runnerID: runner.id, detail: runner.detail,
                        kind: runner.status == .attention ? .warning : .info)
             }
-            if drainingRunnerIDs.contains(runner.id), runner.status == .idle, !busyRunnerIDs.contains(runner.id) {
-                runAction(.stop, on: runner)
-            }
         }
+        processDrainRequests()
         if selectedRunnerID == nil { assign(\.selectedRunnerID, runners.first?.id) }
         // A pending follow-up was requested after this pass started reading, for example
         // by an import that selected its new runner; let that pass resolve the selection.
@@ -318,6 +439,117 @@ final class AppModel {
         if remoteMonitoringEnabled && !isRefreshingWorkload {
             Task { [weak self] in await self?.refreshWorkload() }
         }
+    }
+
+    /// Requests saved by an earlier launch. Each waits until a refresh shows its runner's process.
+    func restoreDrainRequests(_ requests: [String: Int32?]) {
+        drainProcesses = requests
+        unconfirmedDrainRequests = Set(requests.keys)
+        drainingRunnerIDs = Set(requests.keys)
+    }
+
+    /// Ties every request to the process it is for and saves them. A new or confirmed request follows
+    /// its runner's current process; an unconfirmed restored one keeps the process it was saved with.
+    private func bindDrainRequests() {
+        unconfirmedDrainRequests.formIntersection(drainingRunnerIDs)
+        var bound = drainProcesses.filter { drainingRunnerIDs.contains($0.key) }
+        for id in drainingRunnerIDs where !unconfirmedDrainRequests.contains(id) {
+            if let processID = runners.first(where: { $0.id == id })?.processID { bound.updateValue(processID, forKey: id) }
+            else if bound[id] == nil { bound.updateValue(nil, forKey: id) }
+        }
+        guard bound != drainProcesses else { return }
+        drainProcesses = bound
+        drainRequestStore?.save(bound)
+    }
+
+    /// A restored request applies only to the run it was made for. After a logout, a restart of the Mac
+    /// or a runner restarted while RunningMan was closed, that run is over, so the request ends instead of
+    /// stopping the new one. A runner without a visible process keeps its request waiting.
+    private func confirmRestoredDrainRequests() {
+        for id in unconfirmedDrainRequests.sorted() {
+            guard let processID = runners.first(where: { $0.id == id })?.processID else { continue }
+            unconfirmedDrainRequests.remove(id)
+            let saved = drainProcesses[id] ?? nil
+            guard saved != processID else { continue }
+            drainingRunnerIDs.remove(id)
+            record(title: "Stop after job ended: \(runnerDisplayName(id)) restarted while RunningMan was closed", runnerID: id)
+        }
+    }
+
+    /// Stop-after-job requests that no longer apply: the runner is gone, or it is definitely stopped
+    /// (it crashed or was stopped outside RunningMan). An unverifiable state is not evidence of a stop,
+    /// and a runner with an action in progress is left to that action.
+    nonisolated static func endedDrainRequests(_ requests: Set<String>, runners: [RunnerSnapshot], inProgress: Set<String>) -> Set<String> {
+        let snapshots = Dictionary(runners.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return requests.subtracting(inProgress).filter { id in
+            guard let runner = snapshots[id] else { return true }
+            return (runner.status == .stopped || runner.status == .disabled) && runner.processID == nil
+        }
+    }
+
+    /// Runs after each refresh: ends requests that no longer apply, then stops drained runners that have
+    /// gone idle, waiting out the backoff after a failed attempt.
+    func processDrainRequests(now: Date = Date()) {
+        let ended = Self.endedDrainRequests(drainingRunnerIDs, runners: runners, inProgress: busyRunnerIDs)
+        if !ended.isEmpty { drainingRunnerIDs.subtract(ended) }
+        for id in ended.sorted() {
+            record(title: "Stop after job ended: \(runnerDisplayName(id)) is no longer running", runnerID: id)
+        }
+        confirmRestoredDrainRequests()
+        // Requests restored from an earlier launch can predate turning server monitoring off.
+        if !remoteMonitoringEnabled { cancelForgejoDrainRequests() }
+        endUnverifiableDrainRequests(now: now)
+        for runner in runners where drainingRunnerIDs.contains(runner.id) && !unconfirmedDrainRequests.contains(runner.id)
+            && runner.status == .idle && !busyRunnerIDs.contains(runner.id) {
+            if let failure = drainFailures[runner.id], failure.retryDate > now { continue }
+            runAction(.stop, on: runner, origin: .automatic)
+        }
+        // A runner's process can change while RunningMan watches it, for example when it updates itself.
+        bindDrainRequests()
+    }
+
+    /// An unknown state is not evidence of a stop, but a request must not wait on it silently,
+    /// possibly across relaunches: it ends with an explanation once the state stays unknown too long.
+    private func endUnverifiableDrainRequests(now: Date) {
+        for runner in runners where drainingRunnerIDs.contains(runner.id) && !busyRunnerIDs.contains(runner.id) {
+            guard runner.status == .unknown else { drainUnknownSince[runner.id] = nil; continue }
+            let since = drainUnknownSince[runner.id] ?? now
+            drainUnknownSince[runner.id] = since
+            guard now.timeIntervalSince(since) >= Self.drainUnknownLimit else { continue }
+            drainingRunnerIDs.remove(runner.id)
+            record(title: "Stop after job cancelled: \(runner.runner.name)’s activity could not be verified", runnerID: runner.id,
+                   detail: "Its state stayed unknown for \(Int(Self.drainUnknownLimit / 60)) minutes. Check its logs or server connection in Workload, then request the stop again.",
+                   kind: .warning)
+        }
+    }
+
+    /// Automatic stops fail quietly: each distinct reason is logged once per runner, retries back off,
+    /// and the request ends with a warning after `DrainFailure.attemptLimit` attempts.
+    func noteAutomaticStopFailure(runnerID: String, message: String, at date: Date = Date()) {
+        let name = runnerDisplayName(runnerID)
+        // The request ended while this stop ran (cancelled, or the runner stopped otherwise),
+        // so the failure no longer concerns anything the user asked for.
+        guard drainingRunnerIDs.contains(runnerID) else {
+            record(title: "Automatic stop did not finish", runnerID: runnerID, detail: "\(name): \(message)")
+            return
+        }
+        let previous = drainFailures[runnerID]
+        let failure = DrainFailure.after(previous, message: message, at: date)
+        if failure.exhaustsAttempts {
+            drainingRunnerIDs.remove(runnerID)
+            record(title: "Stop after job cancelled: \(name) could not be stopped", runnerID: runnerID,
+                   detail: "\(failure.attempts) automatic attempts failed. Last error: \(message)", kind: .warning)
+            return
+        }
+        drainFailures[runnerID] = failure
+        if previous?.message != message {
+            record(title: "Automatic stop failed", runnerID: runnerID, detail: "\(name): \(message)", kind: .failure)
+        }
+    }
+
+    /// Falls back to the folder name for a runner that is no longer discovered.
+    private func runnerDisplayName(_ id: String) -> String {
+        runners.first { $0.id == id }?.runner.name ?? URL(fileURLWithPath: id).lastPathComponent
     }
 
     func refreshWorkload(force: Bool = false) async {
@@ -368,47 +600,93 @@ final class AppModel {
     func selectionChanged() { updateSelectedLog() }
 
     func perform(_ action: RunnerAction, on runner: RunnerSnapshot) {
+        // Cancelling is always allowed, even when a new request would be refused or an action is
+        // in progress. An automatic stop already running still finishes; it is just not retried.
+        if action == .drain, drainingRunnerIDs.contains(runner.id) {
+            drainingRunnerIDs.remove(runner.id)
+            record(title: "Stop after job cancelled", runnerID: runner.id, detail: runner.runner.name)
+            return
+        }
         guard !busyRunnerIDs.contains(runner.id) else { return }
         guard requireUserService(runner) else { return }
         if action == .drain {
-            if runner.runner.provider == .forgejo && !remoteMonitoringEnabled && !demoMode {
-                errorMessage = "Enable server monitoring in Workload to verify when this Forgejo runner becomes idle. Stop now is available with an interruption confirmation."
+            if let refusal = drainRefusal(for: runner) {
+                errorMessage = refusal
                 return
             }
-            if drainingRunnerIDs.contains(runner.id) {
-                drainingRunnerIDs.remove(runner.id)
-                record(title: "Stop-after-job cancelled", runnerID: runner.id)
-            } else {
-                drainingRunnerIDs.insert(runner.id)
-                record(title: "Will stop after the current job", runnerID: runner.id)
-                if runner.status == .idle { runAction(.stop, on: runner) }
-            }
+            drainingRunnerIDs.insert(runner.id)
+            record(title: "Will stop after the current job", runnerID: runner.id, detail: runner.runner.name)
+            if runner.status == .idle { runAction(.stop, on: runner) }
+            else if demoMode && runner.status == .busy { simulateJobFinish(for: runner.id) }
             return
         }
         if action == .delete {
             confirmation = RunnerConfirmation(title: "Remove \(runner.runner.name)?",
                 message: "Unregisters this runner from \(runner.runner.provider.title) and removes its login service. Installation files and job history are kept. An active job will be interrupted.",
                 buttonTitle: "Remove runner")
-            pendingAction = { [weak self] in self?.runAction(action, on: runner, force: true) }
+            pendingConfirmation = .runner(PendingRunnerAction(action: action, runnerID: runner.id, force: true))
         } else if (runner.status == .busy || runner.status == .unknown) && (action == .stop || action == .disable) {
             confirmation = RunnerConfirmation(title: runner.status == .busy ? "Interrupt the active job?" : "Stop with activity unverified?",
                 message: runner.status == .busy ? "\(runner.runner.name) is building right now. This will stop the runner and interrupt its job. Choose “Stop when idle” to let it finish." : "RunningMan cannot verify whether \(runner.runner.name) has active jobs. Stopping may interrupt work.",
                 buttonTitle: action == .disable ? "Disable and interrupt" : "Stop and interrupt")
-            pendingAction = { [weak self] in self?.runAction(action, on: runner, force: true) }
+            pendingConfirmation = .runner(PendingRunnerAction(action: action, runnerID: runner.id, force: true))
         } else { runAction(action, on: runner) }
     }
 
-    func confirmPendingAction() {
-        let action = pendingAction
-        confirmation = nil
-        pendingAction = nil
-        action?()
+    /// Why a new stop-after-job request cannot be honoured, or nil when it can. A Forgejo runner's
+    /// idle state comes from the server, so its request needs that state to be known.
+    private func drainRefusal(for runner: RunnerSnapshot) -> String? {
+        let name = runner.runner.name
+        if runner.status == .stopped || runner.status == .disabled { return "\(name) is not running." }
+        guard runner.runner.provider == .forgejo else { return nil }
+        guard remoteMonitoringEnabled else {
+            return "Turn on server monitoring in Workload so RunningMan can tell when \(name) finishes its job. You can still stop it now after confirming the interruption."
+        }
+        guard runner.status != .busy, runner.status != .idle else { return nil }
+        return "RunningMan cannot verify whether \(name) is running a job, so it cannot tell when to stop it. Check this server’s connection in Workload, or stop the runner now after confirming the interruption."
     }
-    func cancelPendingAction() { confirmation = nil; pendingAction = nil }
 
-    private func runAction(_ action: RunnerAction, on runner: RunnerSnapshot, force: Bool = false) {
-        if demoMode { simulate(action, runner: runner); return }
-        busyRunnerIDs.insert(runner.id)
+    /// Without server monitoring a Forgejo request could never complete, so it ends with an explanation.
+    private func cancelForgejoDrainRequests() {
+        let ids = drainingRunnerIDs.intersection(runners.filter { $0.runner.provider == .forgejo }.map(\.id))
+        guard !ids.isEmpty else { return }
+        drainingRunnerIDs.subtract(ids)
+        for id in ids.sorted() {
+            record(title: "Stop after job cancelled: Forgejo activity can no longer be verified", runnerID: id, detail: runnerDisplayName(id))
+        }
+    }
+
+    func confirmPendingAction() {
+        let pending = pendingConfirmation
+        confirmation = nil
+        pendingConfirmation = nil
+        switch pending {
+        case .runner(let request): runConfirmed(request)
+        case .clearHistory: clearHistoryConfirmed()
+        case nil: break
+        }
+    }
+    func cancelPendingAction() { confirmation = nil; pendingConfirmation = nil }
+
+    /// The dialog may have stayed open across refreshes and other actions, so the runner's current
+    /// snapshot decides, not the one shown when it opened.
+    private func runConfirmed(_ request: PendingRunnerAction) {
+        guard let runner = runners.first(where: { $0.id == request.runnerID }) else {
+            errorMessage = "\(runnerDisplayName(request.runnerID)) is no longer installed. Nothing was changed."
+            return
+        }
+        guard !busyRunnerIDs.contains(runner.id) else {
+            errorMessage = "\(runner.runner.name) is still busy with another action. Nothing was changed; try again when it finishes."
+            return
+        }
+        runAction(request.action, on: runner, force: request.force)
+    }
+
+    private func runAction(_ action: RunnerAction, on runner: RunnerSnapshot, force: Bool = false, origin: ActionOrigin = .user) {
+        // Two operations must never run on one runner at once; the first one's completion would
+        // re-enable controls while the other is still running.
+        guard busyRunnerIDs.insert(runner.id).inserted else { return }
+        if demoMode { simulate(action, runner: runner); busyRunnerIDs.remove(runner.id); return }
         Task {
             defer { busyRunnerIDs.remove(runner.id) }
             do {
@@ -420,7 +698,8 @@ final class AppModel {
                 case .delete: try await controller.delete(runner.runner, trashFiles: false, force: force)
                 case .drain: return
                 }
-                if action == .stop || action == .disable || action == .delete { drainingRunnerIDs.remove(runner.id) }
+                // A successful start also ends a leftover request, so the runner is not stopped right after.
+                if [.start, .stop, .disable, .delete].contains(action) { drainingRunnerIDs.remove(runner.id) }
                 let title: String
                 switch action {
                 case .start: title = "Runner started"
@@ -433,8 +712,14 @@ final class AppModel {
                 record(title: title, runnerID: runner.id, detail: runner.runner.name, kind: .success)
                 await refresh()
             } catch {
-                errorMessage = Self.message(error)
-                record(title: "Runner action failed", runnerID: runner.id, detail: Self.message(error), kind: .failure)
+                let message = Self.message(error)
+                switch origin {
+                case .user:
+                    errorMessage = message
+                    record(title: "Runner action failed", runnerID: runner.id, detail: message, kind: .failure)
+                case .automatic:
+                    noteAutomaticStopFailure(runnerID: runner.id, message: message)
+                }
             }
         }
     }
@@ -657,12 +942,12 @@ final class AppModel {
         confirmation = RunnerConfirmation(title: "Clear saved job history?",
             message: "Clears RunningMan’s saved history. Runner diagnostic files are kept; jobs still present in those files may appear again after refreshing.",
             buttonTitle: "Clear history")
-        pendingAction = { [weak self] in
-            guard let self else { return }
-            Task {
-                do { if !self.demoMode { try await self.history.clear() }; self.jobs = []; self.record(title: "Saved job history cleared") }
-                catch { self.errorMessage = Self.message(error) }
-            }
+        pendingConfirmation = .clearHistory
+    }
+    private func clearHistoryConfirmed() {
+        Task {
+            do { if !demoMode { try await history.clear() }; jobs = []; record(title: "Saved job history cleared") }
+            catch { errorMessage = Self.message(error) }
         }
     }
 
@@ -859,13 +1144,32 @@ final class AppModel {
         guard let index = runners.firstIndex(where: { $0.id == runner.id }) else { return }
         switch action {
         case .start: runners[index].status = .idle
-        case .stop: runners[index].status = .stopped; drainingRunnerIDs.remove(runner.id)
+        case .stop: runners[index].status = .stopped; runners[index].processID = nil; runners[index].currentJob = nil
         case .enable: runners[index].isEnabled = true; runners[index].status = .stopped
         case .disable: runners[index].isEnabled = false; runners[index].status = .disabled
         case .delete: runners.remove(at: index)
         case .drain: break
         }
+        if [.start, .stop, .disable, .delete].contains(action) { drainingRunnerIDs.remove(runner.id) }
         record(title: "Demo runner updated", runnerID: runner.id)
+    }
+
+    /// Demo jobs never end on their own, so a busy demo runner with a stop-after-job request finishes
+    /// its job successfully after a short pause and then takes the normal idle-stop path.
+    private func simulateJobFinish(for runnerID: String) {
+        let delay = demoDrainDelay
+        Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, drainingRunnerIDs.contains(runnerID),
+                  let index = runners.firstIndex(where: { $0.id == runnerID }), runners[index].status == .busy else { return }
+            if let jobID = runners[index].currentJob?.id, let jobIndex = jobs.firstIndex(where: { $0.id == jobID }) {
+                jobs[jobIndex].outcome = .success
+                jobs[jobIndex].finishedAt = Date()
+            }
+            runners[index].currentJob = nil
+            runners[index].status = .idle
+            processDrainRequests()
+        }
     }
 
     private func loadDemo() {
