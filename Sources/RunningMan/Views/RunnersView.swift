@@ -16,8 +16,22 @@ struct RunnersView: View {
             }
         }.sorted { $0.runner.name.localizedStandardCompare($1.runner.name) == .orderedAscending }
     }
+    @State private var availableWidth: CGFloat = 0
+    private static let minimumListWidth: CGFloat = 300
+    private static let preferredListWidth: CGFloat = 340
+    private static let minimumDetailWidth: CGFloat = 440
+
+    /// Gives the detail its minimum before the list grows past its own.
+    /// The window's 1000 pt minimum leaves room for both beside a full sidebar.
+    private static func listWidth(in totalWidth: CGFloat) -> CGFloat {
+        max(minimumListWidth, min(preferredListWidth, totalWidth - minimumDetailWidth - 1))
+    }
+
     var body: some View {
-        HSplitView {
+        // Not an HSplitView: nested in the NavigationSplitView detail, it asked
+        // for more width than the window had near its minimum size, so the
+        // column grew past the window edge and clipped the runner details.
+        HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 18) {
                     PageHeading(eyebrow: "The fleet", title: "Runners", subtitle: "\(model.runners.count) installed on this Mac")
@@ -43,15 +57,20 @@ struct RunnersView: View {
                     Button { model.showingNewRunner = true } label: { Image(systemName: "plus") }
                         .buttonStyle(.plain).help("Create a runner")
                 }.padding(16)
-            }.frame(minWidth: 300, idealWidth: 340, maxWidth: 400)
+            }.frame(width: Self.listWidth(in: availableWidth))
+            Divider()
             Group {
                 if let snapshot = model.selectedRunner {
                     RunnerDetailView(snapshot: snapshot).id(snapshot.id)
                 } else {
                     EmptyPanel(symbol: "cursorarrow.click.2", title: "Choose a runner", message: "See its live status, manage the service and follow its work.")
                 }
-            }.frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        // Both bounds make the frame take the column's width rather than
+        // passing the content's minimum up to the NavigationSplitView.
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { availableWidth = $0 }
     }
 
     private func runnerRow(_ snapshot: RunnerSnapshot) -> some View {
@@ -140,12 +159,14 @@ struct RunnerDetailView: View {
                 }
                 Picker("Runner details", selection: $tab) {
                     Text("Overview").tag("Overview")
+                    Text("Job log").tag("Job log")
                     Text("Live log").tag("Live log")
                     Text("Jobs (\(model.jobCount(for: snapshot.id)))").tag("Jobs")
                 }.pickerStyle(.segmented).labelsHidden()
             }.padding(24)
             Divider()
             switch tab {
+            case "Job log": JobLogView(snapshot: snapshot)
             case "Live log": logView
             case "Jobs": jobsView
             default: overview
@@ -170,6 +191,11 @@ struct RunnerDetailView: View {
                                     .help(job.finishedAt == nil ? "No completion result in local logs" : "Recorded job duration")
                             }
                         }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 3)
+                        if let step = model.stepLogs[snapshot.id].flatMap({ $0.jobID == job.id ? $0.steps.last { $0.outcome == .running } : nil }) {
+                            Button { tab = "Job log" } label: {
+                                Label("Current step: \(step.name)", systemImage: "list.bullet.rectangle").lineLimit(1)
+                            }.buttonStyle(.link).font(.system(size: 11)).padding(.top, 6).help("Show the job log")
+                        }
                         if isControllable {
                             Button(model.drainingRunnerIDs.contains(snapshot.id) ? "Cancel stop when idle" : "Stop when idle", systemImage: "moon.zzz") { model.perform(.drain, on: snapshot) }
                                 .controlSize(.small).padding(.top, 11)

@@ -7,6 +7,17 @@ import Darwin
 import Glibc
 #endif
 
+/// launchd label prefixes marking a Forgejo runner service as managed by
+/// RunningMan. New installs get the `ch.lkmc` fleet namespace; services
+/// installed under the historical `io.github.l-k-m` prefix stay managed.
+enum ManagedServiceLabel {
+    static let forgejoPrefixes = ["ch.lkmc.RunningMan.forgejo.", "io.github.l-k-m.RunningMan.forgejo."]
+    static let forgejoNew = forgejoPrefixes[0]
+    static func isManagedForgejoLabel(_ label: String) -> Bool {
+        forgejoPrefixes.contains { label.hasPrefix($0) }
+    }
+}
+
 struct ServiceDescriptor {
     var url: URL
     var label: String
@@ -290,7 +301,7 @@ public actor RunnerServiceController {
             let workingPath = plist["WorkingDirectory"] as? String
             let working = workingPath.flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0).standardizedFileURL : nil }
             let workingMatches = working == nil || working?.resolvingSymlinksInPath().path == runner.directory.path
-            let managedMatches = !hasManagedDescriptor || (label.hasPrefix("io.github.l-k-m.RunningMan.forgejo.") && workingPath == runner.directory.path)
+            let managedMatches = !hasManagedDescriptor || (ManagedServiceLabel.isManagedForgejoLabel(label) && workingPath == runner.directory.path)
             matches = label == runner.serviceLabel && workingMatches && managedMatches &&
                 Self.forgejoArgumentsMatch(arguments ?? [], executable: executable, configuration: configuration, workingDirectory: working)
         } else {
@@ -387,7 +398,7 @@ public actor RunnerServiceController {
 
     private func installForgejoService(for runner: InstalledRunner) throws -> ServiceDescriptor {
         guard let executable = runner.executableURL, let configuration = runner.configurationURL,
-              let label = runner.serviceLabel, label.hasPrefix("io.github.l-k-m.RunningMan.forgejo."), !label.contains("/"),
+              let label = runner.serviceLabel, ManagedServiceLabel.isManagedForgejoLabel(label), !label.contains("/"),
               !label.contains("\n"), !label.contains("\r") else { throw RunnerServiceError("This Forgejo installation has no valid managed service metadata.") }
         guard launchAgents.resolvingSymlinksInPath().path == launchAgents.path else { throw RunnerServiceError("The LaunchAgents directory uses a symbolic link. No service was installed.") }
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
@@ -530,7 +541,7 @@ public actor RunnerServiceController {
         var result: [String: Int32] = [:]
         for line in text.split(separator: "\n") {
             let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
-            guard fields.count == 3, fields[2].hasPrefix("actions.runner.") || fields[2].hasPrefix("io.github.l-k-m.RunningMan.forgejo.") || discoveredLabels.contains(String(fields[2])) else { continue }
+            guard fields.count == 3, fields[2].hasPrefix("actions.runner.") || ManagedServiceLabel.isManagedForgejoLabel(String(fields[2])) || discoveredLabels.contains(String(fields[2])) else { continue }
             result[String(fields[2])] = Int32(fields[0]) ?? 0
         }
         return result

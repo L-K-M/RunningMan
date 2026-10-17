@@ -71,6 +71,8 @@ final class AppModel {
     var drainingRunnerIDs: Set<String> = []
     var lastUpdated: Date?
     var logText = ""
+    /// Steps and output of each GitHub runner's most recent job, by runner ID.
+    var stepLogs: [String: JobStepLog] = [:]
     var showingNewRunner = false { didSet { if showingNewRunner { showMainWindow?() } } }
     var showingSettings = false
     var errorMessage: String? { didSet { if errorMessage != nil { showMainWindow?() } } }
@@ -213,6 +215,9 @@ final class AppModel {
         if demoMode { markUpdated(); refreshUsageIfStale(); return }
         let result = await discovery.discover(additionalDirectories: importedDirectories)
         let states = await controller.snapshots(for: result.runners, allowRemoteActivity: remoteMonitoringEnabled)
+        // Process reads in a cancelled task fail, which reads as every runner being unknown.
+        // Monitoring stops when the app quits; never record that as status changes.
+        guard !Task.isCancelled else { return }
         async let githubScan = logs.scan(runners: result.runners.filter { $0.provider == .github })
         async let forgejoScan = forgejoLogs.scan(runners: result.runners.filter { $0.provider == .forgejo })
         async let cleanupScan = cleanupMonitor.scan(runners: result.runners)
@@ -245,6 +250,7 @@ final class AppModel {
         catch { nextWarnings.append(Self.message(error)) }
         assign(\.warnings, nextWarnings)
         logTails = scan.tails
+        updateStepLogs(github.stepLogs)
         updateSelectedLog()
         for event in scan.events { record(event) }
         for runner in runners {
@@ -657,6 +663,16 @@ final class AppModel {
         }
     }
 
+    /// Assigns only changed logs, so views of other runners are not invalidated on every poll.
+    private func updateStepLogs(_ next: [String: JobStepLog]) {
+        for (runnerID, log) in next where stepLogs[runnerID]?.revision != log.revision {
+            stepLogs[runnerID] = log
+        }
+        for runnerID in stepLogs.keys where next[runnerID] == nil {
+            stepLogs[runnerID] = nil
+        }
+    }
+
     private func updateSelectedLog() {
         let next = selectedRunnerID.flatMap { logTails[$0] } ?? ""
         if next != logText { logText = next }
@@ -873,8 +889,64 @@ final class AppModel {
             [13:44:02 INFO] Build completed. Running tests…
             """
         }
+        stepLogs[runners[0].id] = Self.demoStepLog(runnerID: runners[0].id, jobID: "demo-job-0",
+            startedAt: jobs[0].startedAt, isFinished: false, steps: [
+                ("Set up job", 3, .success, [
+                    "Current runner version: '2.337.0'", "> Runner Image Provisioner", "  Hosted Compute Agent",
+                    "> Operating System", "  macOS", "  15.5", "Prepare workflow directory",
+                    "Prepare all required actions", "Download action repository 'actions/checkout@v4'",
+                    "Complete job name: Build & publish macOS app"]),
+                ("Run actions/checkout@v4", 4, .success, [
+                    "> Run actions/checkout@v4", "  with:", "    repository: octocat/WeatherKit", "    fetch-depth: 1",
+                    "Syncing repository: octocat/WeatherKit", "$ /usr/bin/git version", "git version 2.50.1",
+                    "> Fetching the repository", "  $ /usr/bin/git -c protocol.version=2 fetch --no-tags --depth=1 origin",
+                    "Checking out the ref", "$ /usr/bin/git log -1 --format=%H", "5e1c0a2d9b7f4c3e8a6b1d0f2e4c6a8b0d2f4e6a"]),
+                ("Restore build cache", 6, .success, [
+                    "> Run actions/cache@v4", "  with:", "    path: .build", "    key: macos-spm-example",
+                    "Cache restored from key: macos-spm-example"]),
+                ("Build app bundle", nil, .running, [
+                    "> Run scripts/build-app.sh release", "  scripts/build-app.sh release", "  shell: /bin/bash -e {0}",
+                    "Building for production...", "compile WeatherCore (24 files)", "compile WeatherKit (61 files)",
+                    "! Sources/WeatherKit/ForecastView.swift:88:13: 'foregroundColor' is deprecated: use foregroundStyle",
+                    "link WeatherKit", "compile app-icon", "codesign: build/WeatherKit.app: valid on disk"])
+            ])
+        stepLogs[runners[1].id] = Self.demoStepLog(runnerID: runners[1].id, jobID: "demo-job-1",
+            startedAt: jobs[1].startedAt, isFinished: true, steps: [
+                ("Set up job", 2, .success, ["Current runner version: '2.337.0'", "Prepare workflow directory"]),
+                ("Run actions/checkout@v4", 3, .success, ["> Run actions/checkout@v4", "Syncing repository: octocat/TrailNotes"]),
+                ("Run swift test", 41, .success, [
+                    "> Run swift test --parallel", "  swift test --parallel", "Building for debugging...",
+                    "Test Suite 'All tests' started", "Executed 128 tests, with 0 failures (0 unexpected) in 12.4 seconds"]),
+                ("Upload test results", 0, .skipped, []),
+                ("Post Run actions/checkout@v4", 1, .success, ["Post job cleanup.", "$ /usr/bin/git version", "git version 2.50.1"]),
+                ("Complete job", 1, .success, ["Cleaning up orphan processes"])
+            ])
         lastUpdated = Date()
         updateSelectedLog()
+    }
+
+    /// Fictional step output for demo mode. Line prefixes: "> " group header, "  " grouped line,
+    /// "$ " command, "! " warning.
+    private static func demoStepLog(runnerID: String, jobID: String, startedAt: Date, isFinished: Bool,
+                                    steps: [(name: String, seconds: Double?, outcome: JobStepOutcome, lines: [String])]) -> JobStepLog {
+        var lineID = 0
+        var start = startedAt
+        let built = steps.enumerated().map { index, step in
+            let finished = step.seconds.map { start.addingTimeInterval($0) }
+            let lines = step.lines.map { raw -> JobStepLine in
+                defer { lineID += 1 }
+                let date = start
+                if raw.hasPrefix("> ") { return JobStepLine(id: lineID, date: date, text: String(raw.dropFirst(2)), kind: .groupHeader) }
+                if raw.hasPrefix("  ") { return JobStepLine(id: lineID, date: date, text: String(raw.dropFirst(2)), isGrouped: true) }
+                if raw.hasPrefix("$ ") { return JobStepLine(id: lineID, date: date, text: String(raw.dropFirst(2)), kind: .command) }
+                if raw.hasPrefix("! ") { return JobStepLine(id: lineID, date: date, text: String(raw.dropFirst(2)), kind: .warning) }
+                return JobStepLine(id: lineID, date: date, text: raw)
+            }
+            defer { start = finished ?? start }
+            return JobStep(id: index, name: step.name, startedAt: start, finishedAt: finished, outcome: step.outcome, lines: lines)
+        }
+        return JobStepLog(jobID: jobID, runnerID: runnerID, isFinished: isFinished, hasOutput: true,
+                          isTruncated: false, revision: 1, steps: built)
     }
 }
 
