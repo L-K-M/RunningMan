@@ -97,6 +97,57 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.runners[0].status, .unknown)
     }
 
+    @MainActor func testStopAfterJobEndsWhenRunnerStopsOutsideRunningMan() {
+        let model = AppModel(demoMode: true)
+        let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
+        model.perform(.drain, on: busy)
+        XCTAssertTrue(model.drainingRunnerIDs.contains(busy.id))
+        let index = model.runners.firstIndex { $0.id == busy.id }!
+        model.runners[index].status = .stopped
+        model.runners[index].processID = nil
+        model.runners[index].currentJob = nil
+        model.processDrainRequests()
+        XCTAssertFalse(model.drainingRunnerIDs.contains(busy.id))
+        XCTAssertTrue(model.events.contains { $0.title == "Stop after job ended: \(busy.runner.name) is no longer running" })
+        // A later manual start must not be followed by an automatic stop.
+        model.runners[index].status = .idle
+        model.runners[index].processID = 8040
+        model.processDrainRequests()
+        XCTAssertEqual(model.runners[index].status, .idle)
+        // Starting a runner ends a request left over from before it stopped.
+        model.runners[index].status = .stopped
+        model.runners[index].processID = nil
+        model.drainingRunnerIDs.insert(busy.id)
+        model.perform(.start, on: model.runners[index])
+        XCTAssertFalse(model.drainingRunnerIDs.contains(busy.id))
+    }
+
+    @MainActor func testStopAfterJobSurvivesUnverifiableStateAndEndsForRemovedRunner() {
+        let model = AppModel(demoMode: true)
+        let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
+        model.perform(.drain, on: busy)
+        let index = model.runners.firstIndex { $0.id == busy.id }!
+        // A transient process-read failure is not evidence that the runner stopped.
+        model.runners[index].status = .unknown
+        model.runners[index].processID = nil
+        model.processDrainRequests()
+        XCTAssertTrue(model.drainingRunnerIDs.contains(busy.id))
+        model.runners.remove(at: index)
+        model.processDrainRequests()
+        XCTAssertTrue(model.drainingRunnerIDs.isEmpty)
+        XCTAssertTrue(model.events.contains { $0.title == "Stop after job ended: \(busy.runner.name) is no longer running" })
+    }
+
+    @MainActor func testEndedDrainRequestsIgnoreRunnersWithActionsInProgress() {
+        let runner = InstalledRunner(name: "synthetic", directory: URL(fileURLWithPath: "/synthetic/runner"))
+        let stopped = RunnerSnapshot(runner: runner, status: .stopped)
+        XCTAssertEqual(AppModel.endedDrainRequests([runner.id, "/synthetic/gone"], runners: [stopped], inProgress: []),
+                       [runner.id, "/synthetic/gone"])
+        XCTAssertEqual(AppModel.endedDrainRequests([runner.id], runners: [stopped], inProgress: [runner.id]), [])
+        XCTAssertEqual(AppModel.endedDrainRequests([runner.id], runners: [RunnerSnapshot(runner: runner, status: .disabled, processID: 42)],
+                                                   inProgress: []), [])
+    }
+
     func testHistoricalActivityDeduplicatesAcrossRelaunchAndDatePrecision() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

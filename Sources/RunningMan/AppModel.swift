@@ -219,10 +219,8 @@ final class AppModel {
                        runnerID: runner.id, detail: runner.detail,
                        kind: runner.status == .attention ? .warning : .info)
             }
-            if drainingRunnerIDs.contains(runner.id), runner.status == .idle, !busyRunnerIDs.contains(runner.id) {
-                runAction(.stop, on: runner)
-            }
         }
+        processDrainRequests()
         if selectedRunnerID == nil { selectedRunnerID = runners.first?.id }
         if let id = selectedRunnerID, !runners.contains(where: { $0.id == id }) { selectedRunnerID = runners.first?.id }
         updateSelectedLog()
@@ -231,6 +229,33 @@ final class AppModel {
         if remoteMonitoringEnabled && !isRefreshingWorkload {
             Task { [weak self] in await self?.refreshWorkload() }
         }
+    }
+
+    /// Stop-after-job requests that no longer apply: the runner is gone, or it is definitely stopped
+    /// (it crashed or was stopped outside RunningMan). An unverifiable state is not evidence of a stop,
+    /// and a runner with an action in progress is left to that action.
+    static func endedDrainRequests(_ requests: Set<String>, runners: [RunnerSnapshot], inProgress: Set<String>) -> Set<String> {
+        let snapshots = Dictionary(runners.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return requests.subtracting(inProgress).filter { id in
+            guard let runner = snapshots[id] else { return true }
+            return (runner.status == .stopped || runner.status == .disabled) && runner.processID == nil
+        }
+    }
+
+    /// Runs after each refresh: ends requests that no longer apply, then stops drained runners that have gone idle.
+    func processDrainRequests() {
+        for id in Self.endedDrainRequests(drainingRunnerIDs, runners: runners, inProgress: busyRunnerIDs).sorted() {
+            drainingRunnerIDs.remove(id)
+            record(title: "Stop after job ended: \(drainRunnerName(id)) is no longer running", runnerID: id)
+        }
+        for runner in runners where drainingRunnerIDs.contains(runner.id) && runner.status == .idle && !busyRunnerIDs.contains(runner.id) {
+            runAction(.stop, on: runner)
+        }
+    }
+
+    /// Falls back to the folder name for a runner that is no longer discovered.
+    private func drainRunnerName(_ id: String) -> String {
+        runners.first { $0.id == id }?.runner.name ?? URL(fileURLWithPath: id).lastPathComponent
     }
 
     func refreshWorkload(force: Bool = false) async {
@@ -332,7 +357,8 @@ final class AppModel {
                 case .delete: try await controller.delete(runner.runner, trashFiles: false, force: force)
                 case .drain: return
                 }
-                if action == .stop || action == .disable || action == .delete { drainingRunnerIDs.remove(runner.id) }
+                // A successful start also ends a leftover request, so the runner is not stopped right after.
+                if [.start, .stop, .disable, .delete].contains(action) { drainingRunnerIDs.remove(runner.id) }
                 let title: String
                 switch action {
                 case .start: title = "Runner started"
@@ -655,12 +681,13 @@ final class AppModel {
         guard let index = runners.firstIndex(where: { $0.id == runner.id }) else { return }
         switch action {
         case .start: runners[index].status = .idle
-        case .stop: runners[index].status = .stopped; drainingRunnerIDs.remove(runner.id)
+        case .stop: runners[index].status = .stopped
         case .enable: runners[index].isEnabled = true; runners[index].status = .stopped
         case .disable: runners[index].isEnabled = false; runners[index].status = .disabled
         case .delete: runners.remove(at: index)
         case .drain: break
         }
+        if [.start, .stop, .disable, .delete].contains(action) { drainingRunnerIDs.remove(runner.id) }
         record(title: "Demo runner updated", runnerID: runner.id)
     }
 
