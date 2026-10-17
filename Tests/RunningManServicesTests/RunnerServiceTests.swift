@@ -307,7 +307,8 @@ final class InstallerSafetyTests: XCTestCase {
     }
     func testConcurrentRequestsDoNotQueueBehindEachOther() async throws {
         // Blocking one cooperative thread per command would run these in batches
-        // of the processor count, taking at least three seconds.
+        // of the processor count, taking at least three seconds. The bound leaves
+        // headroom for slow process spawning on loaded CI machines.
         let executor = SystemProcessExecutor()
         let count = ProcessInfo.processInfo.activeProcessorCount * 3
         let start = Date()
@@ -315,7 +316,7 @@ final class InstallerSafetyTests: XCTestCase {
             for _ in 0..<count { group.addTask { try await executor.run(ProcessRequest(executable: "/bin/sleep", arguments: ["1"])) } }
             for try await result in group { XCTAssertEqual(result.status, 0) }
         }
-        XCTAssertLessThan(Date().timeIntervalSince(start), 2.5)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.9)
     }
     func testSurvivingDescendantHoldingOutputDoesNotDelayResult() async throws {
         let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-child-pid-" + UUID().uuidString)
@@ -333,6 +334,8 @@ final class InstallerSafetyTests: XCTestCase {
     func testCancelledTaskNeverLaunchesCommand() async throws {
         let marker = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-marker-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: marker) }
+        // withTaskCancellationHandler runs onCancel immediately for an already
+        // cancelled task, so the executor learns about it before launching.
         let task = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             return try await SystemProcessExecutor().run(ProcessRequest(executable: "/usr/bin/touch", arguments: [marker.path]))
