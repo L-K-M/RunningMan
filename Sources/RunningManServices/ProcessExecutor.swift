@@ -157,6 +157,9 @@ private final class ProcessExecution: @unchecked Sendable {
 
     private func stop(_ reason: StopReason) {
         guard stopReason == nil, !exited, !finished else { return }
+        // Foundation can record the exit before processExited() reaches this queue;
+        // a command that already finished is neither timed out nor cancelled.
+        guard !launched || process.isRunning else { return }
         stopReason = reason
         guard launched else { return }
         // SIGTERM reaches the wrapper, whose trap stops the command's process group.
