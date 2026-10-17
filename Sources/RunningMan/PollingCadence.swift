@@ -26,7 +26,8 @@ enum PollingCadence {
         if anyDraining { return foreground }
         let base: Duration
         if uiVisible || anyBusy || (keepAwake && anyRunning) { base = foreground }
-        else if anyRunning { base = background }
+        // Keep-awake must notice a runner that starts outside RunningMan and picks up a job.
+        else if anyRunning || keepAwake { base = background }
         else { base = dormant }
         let interval = lowPower ? base * 2 : base
         return anyRunning ? min(interval, onlineLimit) : interval
@@ -35,6 +36,13 @@ enum PollingCadence {
     /// Lets the system coalesce wake-ups; a tenth of the interval keeps the
     /// online limit plus tolerance well inside the 15-second sampling gap.
     static func tolerance(for interval: Duration) -> Duration { interval / 10 }
+
+    /// The wait after a refresh that took `elapsed`, so refreshes start about
+    /// `interval` apart: a slow refresh must not push consecutive samples past
+    /// the 15-second gap that utilisation sampling accepts.
+    static func wait(after elapsed: Duration, interval: Duration) -> Duration {
+        max(.seconds(1), interval - elapsed)
+    }
 }
 
 /// The polling loop's wait. `wake()` ends the current wait early, so opening the
@@ -42,12 +50,18 @@ enum PollingCadence {
 /// Cancelling the waiting task ends the wait too.
 @MainActor final class PollingTimer {
     private var sleeper: Task<Void, Never>?
+    /// A wake that arrived while no wait was in progress (during a refresh) ends the next wait at once.
+    private var pendingWake = false
 
     func sleep(for interval: Duration) async {
+        guard !pendingWake else { pendingWake = false; return }
         let sleeper = Task { _ = try? await Task.sleep(for: interval, tolerance: PollingCadence.tolerance(for: interval)) }
         self.sleeper = sleeper
         await withTaskCancellationHandler { await sleeper.value } onCancel: { sleeper.cancel() }
+        self.sleeper = nil
     }
 
-    func wake() { sleeper?.cancel() }
+    func wake() {
+        if let sleeper { sleeper.cancel() } else { pendingWake = true }
+    }
 }

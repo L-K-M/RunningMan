@@ -19,7 +19,7 @@ final class PollingCadenceTests: XCTestCase {
     func testBackgroundAndDormantPollLessOften() {
         XCTAssertEqual(interval(running: true), .seconds(10))
         XCTAssertEqual(interval(), .seconds(60))
-        XCTAssertEqual(interval(keepAwake: true), .seconds(60), "Keep-awake has nothing to watch without a running runner.")
+        XCTAssertEqual(interval(keepAwake: true), .seconds(10), "Keep-awake must notice a runner that starts elsewhere and takes a job.")
     }
 
     func testLowPowerModeDoublesExceptForDrains() {
@@ -64,5 +64,19 @@ final class PollingCadenceTests: XCTestCase {
         waiter.cancel()
         await waiter.value
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(5))
+    }
+
+    func testSlowRefreshesShortenTheNextWait() {
+        XCTAssertEqual(PollingCadence.wait(after: .seconds(4), interval: .seconds(10)), .seconds(6))
+        XCTAssertEqual(PollingCadence.wait(after: .seconds(12), interval: .seconds(10)), .seconds(1))
+        XCTAssertEqual(PollingCadence.wait(after: .zero, interval: .seconds(3)), .seconds(3))
+    }
+
+    @MainActor func testWakeDuringARefreshEndsTheNextWait() async {
+        let timer = PollingTimer()
+        timer.wake()
+        let start = ContinuousClock.now
+        await timer.sleep(for: .seconds(30))
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(1))
     }
 }

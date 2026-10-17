@@ -73,8 +73,14 @@ private struct MainWindowScene: View {
             .onAppear {
                 delegate.sceneAppeared(openWindow: openWindow)
                 // Occlusion notifications refine this; the first one can arrive
-                // before WindowIdentity has tagged the window.
+                // before WindowIdentity has tagged the window, so read the window
+                // itself once it exists (a window restored minimised is not visible).
                 model.mainWindowVisible = true
+                DispatchQueue.main.async {
+                    if let window = NSApp.windows.first(where: { $0.identifier == RunningManAppDelegate.mainWindowIdentifier }) {
+                        model.mainWindowVisible = window.occlusionState.contains(.visible)
+                    }
+                }
                 if !snapshotTaskStarted, let directory = SnapshotCapture.destination {
                     snapshotTaskStarted = true
                     Task { await SnapshotCapture.run(model: model, directory: directory) }

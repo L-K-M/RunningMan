@@ -163,9 +163,12 @@ final class AppModel {
             events = await eventStore.load()
             observedEventKeys = Set(events.map(ActivityIdentity.init))
             await refresh()
+            let clock = ContinuousClock()
+            var refreshed = clock.now
             while !Task.isCancelled {
-                await pollingTimer.sleep(for: nextPollInterval())
+                await pollingTimer.sleep(for: PollingCadence.wait(after: clock.now - refreshed, interval: nextPollInterval()))
                 guard !Task.isCancelled else { break }
+                refreshed = clock.now
                 if refreshAutomatically || !drainingRunnerIDs.isEmpty || keepAwakeWhileBusy { await refresh() }
             }
         }
