@@ -8,7 +8,8 @@ struct RunnersView: View {
     private var runners: [RunnerSnapshot] {
         model.filteredRunners.filter { filter.matches($0.status) }.sorted { $0.runner.name.localizedStandardCompare($1.runner.name) == .orderedAscending }
     }
-    @State private var availableWidth: CGFloat = 0
+    /// Starts wide so the first layout shows the usual list, before its width is known.
+    @State private var availableWidth: CGFloat = .greatestFiniteMagnitude
     /// Still fits the five-segment status filter.
     private static let minimumListWidth: CGFloat = 260
     private static let preferredListWidth: CGFloat = 340
@@ -17,8 +18,10 @@ struct RunnersView: View {
     /// a narrower list shows the same choices as a menu.
     private static let segmentedFilterListWidth: CGFloat = 290
 
+    /// The list and the detail at their minimums; the window's minimum width adds the widest sidebar.
+    static let minimumWidth = minimumListWidth + 1 + minimumDetailWidth
+
     /// Gives the detail its minimum before the list grows past its own.
-    /// The window's minimum width leaves room for both beside a full sidebar.
     private static func listWidth(in totalWidth: CGFloat) -> CGFloat {
         max(minimumListWidth, min(preferredListWidth, totalWidth - minimumDetailWidth - 1))
     }

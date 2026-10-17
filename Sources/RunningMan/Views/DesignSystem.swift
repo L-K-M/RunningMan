@@ -240,7 +240,8 @@ struct MetricTile: View {
 }
 
 /// Metric tiles side by side, or two per row when the window leaves each tile less than
-/// `minimumTileWidth`. Tiles in a row share the height of the tallest one.
+/// `minimumTileWidth`. A row of one or two tiles always stays on one line. Tiles in a row
+/// share the height of the tallest one.
 struct MetricRow: Layout {
     var spacing: CGFloat = 12
     var minimumTileWidth: CGFloat = 160

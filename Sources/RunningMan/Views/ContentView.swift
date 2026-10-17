@@ -2,16 +2,18 @@ import SwiftUI
 import RunningManCore
 
 struct ContentView: View {
-    /// Fits a quarter tile of a 1920 by 1080 pt display (half its width and half its height,
-    /// 960 by 540 pt, less the menu bar), and so also a half tile.
-    static let minimumSize = CGSize(width: 800, height: 500)
+    static let sidebarWidth = (min: CGFloat(190), ideal: CGFloat(210), max: CGFloat(250))
+    /// The widest sidebar beside the runner list and detail at their minimums: 841 by 500 pt.
+    /// That fits a quarter tile of a 1920 by 1080 pt display (half its width and half its
+    /// height, 960 by 540 pt, less the menu bar), and so also a half tile.
+    static let minimumSize = CGSize(width: sidebarWidth.max + RunnersView.minimumWidth, height: 500)
     @Environment(AppModel.self) private var model
     @Environment(AppUpdateChecker.self) private var updates
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
             sidebar
-                .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 250)
+                .navigationSplitViewColumnWidth(min: Self.sidebarWidth.min, ideal: Self.sidebarWidth.ideal, max: Self.sidebarWidth.max)
         } detail: {
             VStack(spacing: 0) {
                 if updates.showsBanner, let release = updates.available {

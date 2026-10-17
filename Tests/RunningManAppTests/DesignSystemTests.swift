@@ -130,4 +130,11 @@ final class DesignSystemTests: XCTestCase {
         XCTAssertEqual(MetricRow.columns(for: 2, width: 100, spacing: 12, minimumTileWidth: 160), 2)
         XCTAssertEqual(MetricRow.columns(for: 0, width: 800, spacing: 12, minimumTileWidth: 160), 1)
     }
+
+    /// At the minimum window size and the widest sidebar, the runner detail keeps its minimum.
+    @MainActor func testMinimumWindowFitsTheWidestSidebarAndRunnerPanes() {
+        XCTAssertEqual(ContentView.minimumSize.width - ContentView.sidebarWidth.max, RunnersView.minimumWidth)
+        XCTAssertLessThanOrEqual(ContentView.minimumSize.width, 960, "Half of a 1920 pt display")
+        XCTAssertLessThanOrEqual(ContentView.minimumSize.height, 525, "Half of a 1080 pt display below the menu bar")
+    }
 }
