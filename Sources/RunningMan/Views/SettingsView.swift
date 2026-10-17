@@ -99,8 +99,8 @@ struct RunnerMenuView: View {
                     Text("\(model.runningCount) running · \(model.busyCount) working").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.plain).help("Refresh")
+                Button { Task { await model.refreshNow() } } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.plain).disabled(model.isManualRefreshing).help("Refresh")
             }.padding(16)
             Divider()
             if model.runners.isEmpty {

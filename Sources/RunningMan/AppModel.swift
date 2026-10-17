@@ -27,12 +27,25 @@ struct RunnerConfirmation: Identifiable {
 
 @MainActor @Observable
 final class AppModel {
-    var runners: [RunnerSnapshot] = []
-    var jobs: [RunnerJob] = []
+    var runners: [RunnerSnapshot] = [] { didSet { runnersChanged() } }
+    var jobs: [RunnerJob] = [] { didSet { jobsChanged() } }
     var events: [ActivityEvent] = []
     var warnings: [String] = []
-    var workload: WorkloadReport?
+    var workload: WorkloadReport? { didSet { rebuildQueueCaches() } }
+    /// Republished only when a displayed figure changes; see `observedUsageDisplayChanged`.
     var observedUsage: [String: ObservedRunnerUsage] = [:]
+    // Derived from jobs, runners and workload once per change, so view bodies only
+    // look values up instead of filtering, sorting or recalculating on every render.
+    private(set) var sortedJobs: [RunnerJob] = []
+    private(set) var jobsByRunner: [String: [RunnerJob]] = [:]
+    private(set) var recentJobs: [RunnerJob] = []
+    private(set) var successfulJobs = 0
+    private(set) var completedJobCount = 0
+    private(set) var usageByRunner: [String: RunnerUsageMetrics] = [:]
+    private(set) var runnerNames: [String: String] = [:]
+    /// Compatible queued jobs per runner. A missing entry means unknown, not zero.
+    private(set) var compatibleQueueByRunner: [String: Int] = [:]
+    private(set) var fleetQueue = FleetQueueSummary()
     var cleanupRecords: [RunnerCleanupRecord] = []
     var cleanupWarnings: [String] = []
     var isRefreshingWorkload = false
@@ -52,7 +65,8 @@ final class AppModel {
     var selectedRunnerID: String?
     var section: AppSection = .overview
     var searchText = ""
-    var isRefreshing = false
+    /// Set only by `refreshNow()`, so background polls never animate the toolbar.
+    private(set) var isManualRefreshing = false
     var busyRunnerIDs: Set<String> = []
     var drainingRunnerIDs: Set<String> = []
     var lastUpdated: Date?
@@ -95,6 +109,9 @@ final class AppModel {
     @ObservationIgnored private var logTails: [String: String] = [:]
     @ObservationIgnored private var importedDirectories: [URL] = []
     @ObservationIgnored private var observedEventKeys: Set<ActivityIdentity> = []
+    @ObservationIgnored private let refreshes = RefreshCoalescer()
+    @ObservationIgnored private var usageComputedAt: Date?
+    @ObservationIgnored private var usageCapacities: [String: Int] = [:]
     @ObservationIgnored var showMainWindow: (() -> Void)?
 
     static var supportDirectory: URL {
@@ -130,24 +147,26 @@ final class AppModel {
                 .contains { $0.localizedCaseInsensitiveContains(query) }
         }
     }
+    /// Newest first; filtering keeps the order of `sortedJobs`.
     var filteredJobs: [RunnerJob] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return jobs.filter {
-            query.isEmpty || [$0.name, $0.repository ?? "", $0.workflow ?? "", $0.outcome.title]
+        guard !query.isEmpty else { return sortedJobs }
+        return sortedJobs.filter {
+            [$0.name, $0.repository ?? "", $0.workflow ?? "", $0.outcome.title]
                 .contains { $0.localizedCaseInsensitiveContains(query) }
-        }.sorted { $0.startedAt > $1.startedAt }
+        }
     }
     var runningCount: Int { runners.filter { $0.status.isRunning || $0.processID != nil }.count }
     var busyCount: Int { runners.filter { $0.status == .busy }.count }
     var startsAtLoginCount: Int { runners.filter { $0.startsAtLogin && $0.isEnabled }.count }
-    var successfulJobs: Int { jobs.filter { $0.outcome == .success }.count }
     var successRate: Double? {
-        let completed = jobs.filter { [.success, .failure, .cancelled].contains($0.outcome) }
-        return completed.isEmpty ? nil : Double(successfulJobs) / Double(completed.count)
+        completedJobCount == 0 ? nil : Double(successfulJobs) / Double(completedJobCount)
     }
-    func jobs(for runnerID: String) -> [RunnerJob] {
-        jobs.filter { $0.runnerID == runnerID }.sorted { $0.startedAt > $1.startedAt }
-    }
+    /// Newest first.
+    func jobs(for runnerID: String) -> [RunnerJob] { jobsByRunner[runnerID] ?? [] }
+    func jobCount(for runnerID: String) -> Int { jobsByRunner[runnerID]?.count ?? 0 }
+    /// Passes started by the refresh coalescer; a test seam.
+    var refreshPassCount: Int { refreshes.passCount }
 
     func startMonitoring() {
         guard pollingTask == nil, !demoMode else { return }
@@ -174,11 +193,24 @@ final class AppModel {
         sleepPrevention = nil
     }
 
+    /// Refreshes runner state. A call made while a pass is running waits for one
+    /// coalesced follow-up pass, so a caller always observes state read after its request.
     func refresh() async {
-        guard !isRefreshing else { return }
-        if demoMode { lastUpdated = Date(); return }
-        isRefreshing = true
-        defer { isRefreshing = false }
+        await refreshes.run { await refreshPass() }
+    }
+
+    /// The toolbar button, the Refresh command and the menu bar use this; it is the
+    /// only refresh that shows progress, so background polls never animate the UI.
+    func refreshNow() async {
+        guard !isManualRefreshing else { return }
+        isManualRefreshing = true
+        defer { isManualRefreshing = false }
+        await refresh()
+    }
+
+    /// Never call `refresh()` from inside a pass: it would wait for its own follow-up.
+    private func refreshPass() async {
+        if demoMode { markUpdated(); refreshUsageIfStale(); return }
         let result = await discovery.discover(additionalDirectories: importedDirectories)
         let states = await controller.snapshots(for: result.runners, allowRemoteActivity: remoteMonitoringEnabled)
         async let githubScan = logs.scan(runners: result.runners.filter { $0.provider == .github })
@@ -186,8 +218,8 @@ final class AppModel {
         async let cleanupScan = cleanupMonitor.scan(runners: result.runners)
         let (github, forgejo) = await (githubScan, forgejoScan)
         let cleanup = await cleanupScan
-        cleanupRecords = cleanup.records
-        cleanupWarnings = cleanup.warnings
+        assign(\.cleanupRecords, cleanup.records)
+        assign(\.cleanupWarnings, cleanup.warnings)
         let scan = LogScanResult(jobs: github.jobs + forgejo.jobs, events: github.events + forgejo.events,
                                 warnings: github.warnings + forgejo.warnings,
                                 tails: github.tails.merging(forgejo.tails) { _, latest in latest })
@@ -200,16 +232,18 @@ final class AppModel {
                 .max { $0.startedAt < $1.startedAt }
         }
         let oldStates = Dictionary(uniqueKeysWithValues: runners.map { ($0.id, $0.status) })
-        runners = next.sorted { $0.runner.name.localizedStandardCompare($1.runner.name) == .orderedAscending }
-        warnings = Array((result.warnings + scan.warnings + cleanup.warnings).map(SecretRedactor.redact).prefix(20))
+        assign(\.runners, next.sorted { $0.runner.name.localizedStandardCompare($1.runner.name) == .orderedAscending })
+        var nextWarnings = Array((result.warnings + scan.warnings + cleanup.warnings).map(SecretRedactor.redact).prefix(20))
         do {
             try await activitySamples.record(snapshots: runners)
             var metrics: [String: ObservedRunnerUsage] = [:]
             for runner in runners { metrics[runner.id] = try await activitySamples.metrics(for: runner.id) }
-            observedUsage = metrics
-        } catch { warnings.append("Activity sampling: " + Self.message(error)) }
-        do { jobs = try await history.merge(reconciled) }
-        catch { warnings.append(Self.message(error)) }
+            // The window end moves every poll, so exact values always differ.
+            if Self.observedUsageDisplayChanged(from: observedUsage, to: metrics) { observedUsage = metrics }
+        } catch { nextWarnings.append("Activity sampling: " + Self.message(error)) }
+        do { assign(\.jobs, try await history.merge(reconciled)) }
+        catch { nextWarnings.append(Self.message(error)) }
+        assign(\.warnings, nextWarnings)
         logTails = scan.tails
         updateSelectedLog()
         for event in scan.events { record(event) }
@@ -223,10 +257,15 @@ final class AppModel {
                 runAction(.stop, on: runner)
             }
         }
-        if selectedRunnerID == nil { selectedRunnerID = runners.first?.id }
-        if let id = selectedRunnerID, !runners.contains(where: { $0.id == id }) { selectedRunnerID = runners.first?.id }
+        if selectedRunnerID == nil { assign(\.selectedRunnerID, runners.first?.id) }
+        // A pending follow-up was requested after this pass started reading, for example
+        // by an import that selected its new runner; let that pass resolve the selection.
+        if let id = selectedRunnerID, !runners.contains(where: { $0.id == id }), !refreshes.hasPendingFollowUp {
+            assign(\.selectedRunnerID, runners.first?.id)
+        }
         updateSelectedLog()
-        lastUpdated = Date()
+        markUpdated()
+        refreshUsageIfStale()
         updateSleepPrevention()
         if remoteMonitoringEnabled && !isRefreshingWorkload {
             Task { [weak self] in await self?.refreshWorkload() }
@@ -260,8 +299,9 @@ final class AppModel {
         workload?.scopes.first { $0.runnerIDs.contains(runnerID) }
     }
     func usage(for runner: InstalledRunner) -> RunnerUsageMetrics {
-        RunnerUsage.calculate(runner: runner, jobs: jobs)
+        usageByRunner[runner.id] ?? RunnerUsage.calculate(runner: runner, jobs: jobs(for: runner.id))
     }
+    func compatibleQueueCount(for runnerID: String) -> Int? { compatibleQueueByRunner[runnerID] }
 
     var filteredCleanupRecords: [RunnerCleanupRecord] {
         let query = section == .cleanup ? searchText.trimmingCharacters(in: .whitespacesAndNewlines) : ""
@@ -271,7 +311,7 @@ final class AppModel {
         }.sorted { ($0.finishedAt ?? $0.startedAt) > ($1.finishedAt ?? $1.startedAt) }
     }
 
-    func runnerName(for id: String) -> String { runners.first { $0.id == id }?.runner.name ?? "Runner no longer installed" }
+    func runnerName(for id: String) -> String { runnerNames[id] ?? "Runner no longer installed" }
 
     func latestCleanup(for runnerID: String) -> RunnerCleanupRecord? {
         cleanupRecords.filter { $0.runnerID == runnerID }.max { ($0.finishedAt ?? $0.startedAt) < ($1.finishedAt ?? $1.startedAt) }
@@ -621,6 +661,68 @@ final class AppModel {
         let next = selectedRunnerID.flatMap { logTails[$0] } ?? ""
         if next != logText { logText = next }
     }
+
+    /// Writes only real changes. The Observation macro in the Swift 6.1 toolchain used
+    /// for CI and releases notifies observers on every assignment, even of an equal
+    /// value, which would re-render most views on every poll.
+    @discardableResult
+    private func assign<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AppModel, Value>, _ value: Value) -> Bool {
+        guard self[keyPath: keyPath] != value else { return false }
+        self[keyPath: keyPath] = value
+        return true
+    }
+
+    /// Views show the refresh time to the minute, so a poll within the same minute
+    /// leaves it unchanged.
+    private func markUpdated(at date: Date = Date()) {
+        guard !Self.isSameDisplayedMinute(lastUpdated, date) else { return }
+        lastUpdated = date
+    }
+
+    private func jobsChanged() {
+        let sorted = jobs.sorted { $0.startedAt == $1.startedAt ? $0.id < $1.id : $0.startedAt > $1.startedAt }
+        assign(\.sortedJobs, sorted)
+        assign(\.recentJobs, Array(sorted.prefix(4)))
+        assign(\.successfulJobs, sorted.filter { $0.outcome == .success }.count)
+        assign(\.completedJobCount, sorted.filter { [.success, .failure, .cancelled].contains($0.outcome) }.count)
+        if assign(\.jobsByRunner, Dictionary(grouping: sorted, by: \.runnerID)) { rebuildUsage() }
+    }
+
+    private func runnersChanged() {
+        assign(\.runnerNames, Dictionary(runners.map { ($0.id, $0.runner.name) }, uniquingKeysWith: { first, _ in first }))
+        // Status changes every few polls; recorded usage only depends on identity and capacity.
+        if Self.capacities(of: runners) != usageCapacities { rebuildUsage() }
+        rebuildQueueCaches()
+    }
+
+    /// Recalculates recorded usage from each runner's own jobs. The sliding 24-hour
+    /// window otherwise advances at most once a minute through `refreshUsageIfStale`.
+    private func rebuildUsage(now: Date = Date()) {
+        usageCapacities = Self.capacities(of: runners)
+        usageComputedAt = now
+        var usage: [String: RunnerUsageMetrics] = [:]
+        for snapshot in runners where usage[snapshot.id] == nil {
+            usage[snapshot.id] = RunnerUsage.calculate(runner: snapshot.runner, jobs: jobs(for: snapshot.id), now: now)
+        }
+        assign(\.usageByRunner, usage)
+    }
+
+    private func refreshUsageIfStale(now: Date = Date()) {
+        guard usageComputedAt.map({ now.timeIntervalSince($0) >= 60 }) ?? true else { return }
+        rebuildUsage(now: now)
+    }
+
+    /// Fleet figures use every scope, not the search-filtered `visibleWorkloadScopes`.
+    private func rebuildQueueCaches() {
+        let scopes = workload?.scopes ?? []
+        assign(\.compatibleQueueByRunner, FleetQueueSummary.compatibleQueueCounts(scopes: scopes, runnerIDs: runners.map(\.id)))
+        assign(\.fleetQueue, FleetQueueSummary(scopes: scopes))
+    }
+
+    private static func capacities(of runners: [RunnerSnapshot]) -> [String: Int] {
+        Dictionary(runners.map { ($0.id, $0.runner.capacity) }, uniquingKeysWith: { first, _ in first })
+    }
+
     private static func message(_ error: Error) -> String { SecretRedactor.redact(error.localizedDescription) }
     private func record(title: String, runnerID: String? = nil, detail: String? = nil, kind: ActivityKind = .info) {
         record(ActivityEvent(runnerID: runnerID, title: title, detail: detail.map(SecretRedactor.redact), kind: kind))

@@ -3,8 +3,8 @@ import RunningManCore
 
 struct OverviewView: View {
     @Environment(AppModel.self) private var model
-    private var recentJobs: [RunnerJob] { Array(model.jobs.sorted { $0.startedAt > $1.startedAt }.prefix(4)) }
     var body: some View {
+        let recentJobs = model.recentJobs
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 HStack(alignment: .top) {
@@ -66,9 +66,14 @@ struct OverviewView: View {
                         if recentJobs.isEmpty {
                             EmptyPanel(symbol: "clock", title: "Ready for the first run", message: "Job history appears when your runners pick up work.").frame(height: 150)
                         } else {
-                            ForEach(Array(recentJobs.enumerated()), id: \.element.id) { index, job in
-                                JobRow(job: job)
-                                if index < recentJobs.count - 1 { Divider() }
+                            TimelineView(.everyMinute) { _ in
+                                let now = Date()
+                                VStack(alignment: .leading, spacing: 0) {
+                                    ForEach(Array(recentJobs.enumerated()), id: \.element.id) { index, job in
+                                        JobRow(job: job, timestamp: .relative(now: now))
+                                        if index < recentJobs.count - 1 { Divider() }
+                                    }
+                                }
                             }
                         }
                     }.frame(maxWidth: .infinity)
@@ -77,8 +82,11 @@ struct OverviewView: View {
                         if model.events.isEmpty {
                             EmptyPanel(symbol: "waveform.path", title: "All quiet", message: "Runner changes and local actions will appear here.").frame(height: 150)
                         } else {
-                            VStack(alignment: .leading, spacing: 17) {
-                                ForEach(model.events.prefix(5)) { event in activityRow(event) }
+                            TimelineView(.everyMinute) { _ in
+                                let now = Date()
+                                VStack(alignment: .leading, spacing: 17) {
+                                    ForEach(model.events.prefix(5)) { event in activityRow(event, now: now) }
+                                }
                             }
                         }
                     }.frame(maxWidth: .infinity)
@@ -103,7 +111,7 @@ struct OverviewView: View {
         }
     }
 
-    private func activityRow(_ event: ActivityEvent) -> some View {
+    private func activityRow(_ event: ActivityEvent, now: Date) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Circle().fill(event.kind == .failure ? Color.red : event.kind == .warning ? .orange : event.kind == .success ? RunningManStyle.teal : .indigo)
                 .frame(width: 6, height: 6).padding(.top, 5)
@@ -112,7 +120,7 @@ struct OverviewView: View {
                 if let detail = event.detail { Text(detail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2) }
             }
             Spacer(minLength: 4)
-            Text(event.date, style: .relative).font(.system(size: 9)).foregroundStyle(.tertiary)
+            Text(RelativeTime.text(for: event.date, now: now)).font(.system(size: 9)).foregroundStyle(.tertiary)
         }
     }
 }

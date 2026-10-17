@@ -3,42 +3,25 @@ import RunningManCore
 
 struct WorkloadView: View {
     @Environment(AppModel.self) private var model
-    private var scopes: [WorkloadScopeSnapshot] { model.visibleWorkloadScopes }
-    private var compatibleJobs: [WorkloadJob] {
-        var jobs: [String: WorkloadJob] = [:]
-        for scope in scopes {
-            guard let queued = scope.compatibleQueuedJobs, let running = scope.compatibleRunningJobs else { continue }
-            for job in queued + running { jobs[job.id] = job }
-        }
-        return Array(jobs.values)
-    }
-    private var hasQueueEvidence: Bool {
-        scopes.contains { $0.compatibleQueuedJobs != nil }
-    }
-    private var incomplete: Bool {
-        scopes.contains { scope in
-            scope.state != .available || scope.compatibleQueuedJobs == nil
-        }
-    }
-    private var queueCount: Int { compatibleJobs.filter { $0.state == .queued }.count }
-    private var oldest: Date? { compatibleJobs.filter { $0.state == .queued }.compactMap(\.createdAt).min() }
-    private func queue(for runnerID: String) -> Int {
-        guard let scope = model.workloadScope(for: runnerID), let jobs = scope.compatibleQueuedJobs,
-              let labels = scope.runnerLabels[runnerID] else { return -1 }
-        return jobs.filter { WorkloadScopeSnapshot.matches(jobLabels: $0.labels, runnerLabels: labels, provider: scope.provider) }.count
-    }
-    private var activityRunners: [RunnerSnapshot] {
-        model.runners.sorted { left, right in
-            let a = queue(for: left.id), b = queue(for: right.id)
+    /// Busiest first: longest compatible queue, then highest observed busy rate.
+    private var rankedRunners: [RunnerSnapshot] {
+        let queues = model.compatibleQueueByRunner, usage = model.observedUsage
+        return model.runners.sorted { left, right in
+            let a = queues[left.id] ?? -1, b = queues[right.id] ?? -1
             if a != b { return a > b }
-            let busyA = model.observedUsage[left.id]?.busyFraction ?? -1
-            let busyB = model.observedUsage[right.id]?.busyFraction ?? -1
+            let busyA = usage[left.id]?.busyFraction ?? -1
+            let busyB = usage[right.id]?.busyFraction ?? -1
             if busyA != busyB { return busyA > busyB }
             return left.runner.name.localizedStandardCompare(right.runner.name) == .orderedAscending
         }
     }
 
     var body: some View {
+        // Bind derived values once per render. Queue metrics describe the whole fleet;
+        // only the server queue list below follows the search field.
+        let scopes = model.visibleWorkloadScopes
+        let fleet = model.fleetQueue
+        let activityRunners = rankedRunners
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(alignment: .top) {
@@ -68,9 +51,9 @@ struct WorkloadView: View {
                     }
                 }
                 HStack(spacing: 12) {
-                    metric("Compatible queued", value: hasQueueEvidence ? "\(queueCount)\(incomplete ? "+" : "")" : "—",
-                           note: "Shared across matching runners", symbol: "tray.full", color: queueCount > 0 ? .orange : .indigo)
-                    metric("Oldest queued", value: oldest.map { formattedDuration(Date().timeIntervalSince($0)) } ?? "—",
+                    metric("Compatible queued", value: fleet.hasQueueEvidence ? "\(fleet.queuedCount)\(fleet.isIncomplete ? "+" : "")" : "—",
+                           note: "Shared across matching runners", symbol: "tray.full", color: fleet.queuedCount > 0 ? .orange : .indigo)
+                    metric("Oldest queued", value: fleet.oldestQueuedAt.map { formattedDuration(Date().timeIntervalSince($0)) } ?? "—",
                            note: "When the server reports its age", symbol: "hourglass", color: .orange)
                     metric("Busy runners", value: "\(model.busyCount)", note: "At least one active job", symbol: "bolt.fill", color: .indigo)
                     metric("Configured slots", value: "\(model.runners.reduce(0) { $0 + $1.runner.capacity })",
@@ -133,15 +116,12 @@ struct WorkloadView: View {
 struct RunnerWorkloadRow: View {
     @Environment(AppModel.self) private var model
     let snapshot: RunnerSnapshot
-    private var observed: ObservedRunnerUsage? { model.observedUsage[snapshot.id] }
-    private var history: RunnerUsageMetrics { model.usage(for: snapshot.runner) }
-    private var queue: Int? {
-        guard let scope = model.workloadScope(for: snapshot.id), let queued = scope.compatibleQueuedJobs,
-              let labels = scope.runnerLabels[snapshot.id] else { return nil }
-        return queued.filter { WorkloadScopeSnapshot.matches(jobLabels: $0.labels, runnerLabels: labels, provider: scope.provider) }.count
-    }
 
     var body: some View {
+        // Cached in AppModel; these are lookups, not calculations.
+        let observed = model.observedUsage[snapshot.id]
+        let history = model.usage(for: snapshot.runner)
+        let queue = model.compatibleQueueCount(for: snapshot.id)
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -175,11 +155,17 @@ struct RunnerWorkloadRow: View {
                 }
             }.frame(height: 5).accessibilityHidden(true)
             HStack {
-                Text(observed.map { "\(formattedDuration($0.observedSeconds)) observed · \(formattedDuration($0.busySeconds)) busy" } ?? "Waiting for two activity samples")
+                Text(observed.map { "\(wholeMinutes($0.observedSeconds)) observed · \(wholeMinutes($0.busySeconds)) busy" } ?? "Waiting for two activity samples")
                 Spacer()
                 if let duration = history.medianDuration { Text("Median job \(formattedDuration(duration))") }
             }.font(.system(size: 9)).foregroundStyle(.secondary)
         }.padding(18)
+    }
+
+    /// AppModel republishes sampled usage only when a whole minute or the rounded
+    /// percentage changes, so seconds here would be stale.
+    private func wholeMinutes(_ seconds: TimeInterval) -> String {
+        formattedDuration((seconds / 60).rounded(.down) * 60)
     }
 }
 
