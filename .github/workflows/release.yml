@@ -18,6 +18,10 @@ name: Release
       tag:
         description: Tag of an existing release to build and attach the app to
         required: true
+      announce_without_preview:
+        description: Announce the release even if the preview smoke test fails (recorded in the run summary)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -78,6 +82,10 @@ jobs:
           app="dist/RunningMan.app"
           plutil -lint "$app/Contents/Info.plist"
           test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "${TAG#v}"
+          if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+            echo "::error::The release checkout is shallow, so CFBundleVersion cannot be the commit count."
+            exit 1
+          fi
           build_number="$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")"
           if [ "$build_number" != "$(git rev-list --count HEAD)" ] || [ "$build_number" -le 1 ]; then
             echo "::error::CFBundleVersion is '$build_number', expected the commit count $(git rev-list --count HEAD); was the checkout shallow?"
@@ -137,10 +145,17 @@ jobs:
           retention-days: 14
 
       - name: Fail when the preview did not pass
-        if: steps.smoke.outcome != 'success'
+        if: steps.smoke.outcome == 'failure'
+        env:
+          WAIVED: ${{ inputs.announce_without_preview == true }}
         run: |
+          if [ "$WAIVED" = true ]; then
+            echo "::warning::The preview smoke test did not pass; announcing $TAG anyway because the run was started with announce_without_preview."
+            echo "The preview smoke test did not pass. The maintainer waived it with announce_without_preview, so $TAG is announced anyway." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           echo "::error::The preview smoke test did not pass. The assets are attached, but installed apps are not told about $TAG."
-          echo "The preview smoke test did not pass, so the update manifest was not published for $TAG. Fix the preview, then rerun this workflow for the tag." >> "$GITHUB_STEP_SUMMARY"
+          echo "The preview smoke test did not pass, so the update manifest was not published for $TAG. Fix the preview and rerun this workflow for the tag, or rerun it with announce_without_preview after checking the build by hand." >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
   publish-update-manifest:

@@ -24,7 +24,8 @@ number is the commit count. The release workflow verifies the tag shape and
 `CFBundleShortVersionString`, requires an annotated tag on `main`, reruns the
 tests, and refuses to announce drafts, prereleases, non-version tags or
 builds whose preview smoke test did not pass (the assets are still
-attached and the run fails visibly).
+attached and the run fails visibly; a manual run can waive this with
+`announce_without_preview`, which is recorded in the run summary).
 Builds are ad-hoc signed — never describe them as notarized or Developer ID
 signed.
 
