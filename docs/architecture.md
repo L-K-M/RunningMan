@@ -47,7 +47,7 @@ Partial installations are preserved because remote registration may already have
 
 Forgejo registration uses its modern repository, organization, user or administrator runner API. Its official release assets do not include a native Mac binary, so explicit creation installs the checksummed Homebrew core formula, copies that binary into the owned installation and writes a private per-user service. Node.js for JavaScript actions is a separate host prerequisite. The API token stays in the login Keychain; the runner receives its own connection credential in a private file referenced by its configuration. Discovery and diagnostics do not open either credential file.
 
-Forgejo daemon PIDs establish a live process, not an idle worker. With remote monitoring enabled, bounded, cached server runner status can establish idle or active state. Stop, disable and unregister recheck activity freshly. Without that evidence, activity remains unknown and interruption requires explicit confirmation. A startup checkbox never reloads a live process.
+Forgejo daemon PIDs establish a live process, not an idle worker. Process arguments are matched with the same daemon-command parser as LaunchAgent arguments, so flag order and `--config=` forms do not matter. Because `ps` does not show a working directory, a relative configuration path matches only when the executable lives in the runner directory. With remote monitoring enabled, bounded, cached server runner status can establish idle or active state. Stop, disable and unregister recheck activity freshly. Without that evidence, activity remains unknown and interruption requires explicit confirmation. A startup checkbox never reloads a live process.
 
 ## Workload and utilisation
 
