@@ -22,7 +22,9 @@ Release tags are annotated `vX.Y.Z` tags on `main`, cut with
 the marketing version (`RUNNINGMAN_VERSION` at build time); the bundle build
 number is the commit count. The release workflow verifies the tag shape and
 `CFBundleShortVersionString`, requires an annotated tag on `main`, reruns the
-tests, and refuses to announce drafts, prereleases or non-version tags.
+tests, and refuses to announce drafts, prereleases, non-version tags or
+builds whose preview smoke test did not pass (the assets are still
+attached).
 Builds are ad-hoc signed — never describe them as notarized or Developer ID
 signed.
 

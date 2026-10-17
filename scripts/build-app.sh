@@ -26,6 +26,7 @@ case "$version" in *[!0-9.]*|"") echo "RUNNINGMAN_VERSION must be a numeric vers
 # it. A shallow clone counts only the fetched commits, so CI checks out the
 # full history; a copy without .git builds with 0 rather than failing.
 if [ -n "${RUNNINGMAN_BUILD_NUMBER:-}" ]; then
+  case "$RUNNINGMAN_BUILD_NUMBER" in *[!0-9]*) echo "RUNNINGMAN_BUILD_NUMBER must contain only digits." >&2; exit 2 ;; esac
   build_number="$RUNNINGMAN_BUILD_NUMBER"
 elif build_number="$(git -C "$project_root" rev-list --count HEAD 2>/dev/null)"; then
   if [ "$(git -C "$project_root" rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
@@ -35,7 +36,7 @@ else
   build_number=0
   echo "warning: no git history, so the build number is 0. Set RUNNINGMAN_BUILD_NUMBER to override it." >&2
 fi
-case "$build_number" in *[!0-9]*|"") echo "RUNNINGMAN_BUILD_NUMBER must contain only digits." >&2; exit 2 ;; esac
+case "$build_number" in *[!0-9]*|"") echo "git returned an invalid commit count: '$build_number'." >&2; exit 2 ;; esac
 
 # Start from an empty bundle so files a previous build left behind never ship,
 # and drop the old zip so it cannot outlive the app it was made from.

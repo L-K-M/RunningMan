@@ -31,6 +31,8 @@ jobs:
     name: Build and attach RunningMan.app
     runs-on: macos-15
     timeout-minutes: 30
+    outputs:
+      smoke: ${{ steps.smoke.outcome }}
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
     steps:
@@ -79,8 +81,8 @@ jobs:
           plutil -lint "$app/Contents/Info.plist"
           test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "${TAG#v}"
           build_number="$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")"
-          if ! [[ "$build_number" =~ ^[0-9]+$ ]] || [ "$build_number" -le 1 ]; then
-            echo "::error::CFBundleVersion is '$build_number', expected the commit count (an integer greater than 1); was the checkout shallow?"
+          if [ "$build_number" != "$(git rev-list --count HEAD)" ] || [ "$build_number" -le 1 ]; then
+            echo "::error::CFBundleVersion is '$build_number', expected the commit count $(git rev-list --count HEAD); was the checkout shallow?"
             exit 1
           fi
           lipo "$app/Contents/MacOS/RunningMan" -verify_arch arm64 x86_64
@@ -117,16 +119,35 @@ jobs:
 
       - name: Render isolated preview
         # A smoke check of the demo-mode screenshots, run against the bundle
-        # still in dist/. It must never block shipping a build that passed the
-        # tests and the bundle checks, so it runs last, bounded and non-fatal.
+        # still in dist/. A stalled capture must not keep the assets from
+        # shipping, so it runs last and bounded. Its outcome gates only the
+        # update announcement (publish-update-manifest below).
+        id: smoke
         continue-on-error: true
         timeout-minutes: 5
         run: scripts/smoke-test.sh
 
+      - name: Report a failed preview
+        if: steps.smoke.outcome != 'success'
+        run: |
+          echo "::warning::The preview smoke test did not pass; the assets are attached, but the update manifest will not announce $TAG."
+          echo "The preview smoke test did not pass, so installed apps are not told about $TAG. Fix the preview, then rerun this workflow for the tag." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload preview screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: RunningMan-release-preview
+          path: .local/screenshots/
+          if-no-files-found: ignore
+          retention-days: 14
+
   publish-update-manifest:
     name: Publish update manifest
-    # Only after the release exists with every asset attached.
+    # Only after the release exists with every asset attached and the
+    # preview smoke test launched the app successfully.
     needs: app
+    if: needs.app.outputs.smoke == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
