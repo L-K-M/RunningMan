@@ -225,6 +225,40 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.jobs.isEmpty)
     }
 
+    @MainActor func testDemoStopAfterJobFinishesTheJobAndStopsTheRunner() async throws {
+        let model = AppModel(demoMode: true)
+        model.demoDrainDelay = .milliseconds(20)
+        let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
+        let jobID = try XCTUnwrap(busy.currentJob?.id)
+        model.perform(.drain, on: busy)
+        XCTAssertEqual(model.runners.first { $0.id == busy.id }?.status, .busy)
+        for _ in 0..<200 where model.drainingRunnerIDs.contains(busy.id) { try await Task.sleep(for: .milliseconds(10)) }
+        let runner = try XCTUnwrap(model.runners.first { $0.id == busy.id })
+        XCTAssertEqual(runner.status, .stopped)
+        XCTAssertNil(runner.processID)
+        XCTAssertNil(runner.currentJob)
+        XCTAssertFalse(model.drainingRunnerIDs.contains(busy.id))
+        let job = try XCTUnwrap(model.jobs.first { $0.id == jobID })
+        XCTAssertEqual(job.outcome, .success)
+        XCTAssertNotNil(job.finishedAt)
+
+        // An idle runner still stops at once.
+        let idle = model.runners.first { $0.status == .idle && $0.runner.provider == .github }!
+        model.perform(.drain, on: idle)
+        XCTAssertEqual(model.runners.first { $0.id == idle.id }?.status, .stopped)
+    }
+
+    @MainActor func testCancelledDemoStopAfterJobLeavesTheRunnerBusy() async throws {
+        let model = AppModel(demoMode: true)
+        model.demoDrainDelay = .milliseconds(20)
+        let forgejo = model.runners.first { $0.status == .busy && $0.runner.provider == .forgejo }!
+        model.perform(.drain, on: forgejo)
+        model.perform(.drain, on: forgejo)
+        XCTAssertFalse(model.drainingRunnerIDs.contains(forgejo.id))
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(model.runners.first { $0.id == forgejo.id }?.status, .busy)
+    }
+
     func testDrainRequestStoreRoundTripsThroughSuite() throws {
         let suiteName = "RunningManTests.drain.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

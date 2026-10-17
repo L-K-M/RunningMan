@@ -151,6 +151,8 @@ final class AppModel {
     @ObservationIgnored private var importedDirectories: [URL] = []
     @ObservationIgnored private var observedEventKeys: Set<ActivityIdentity> = []
     @ObservationIgnored var showMainWindow: (() -> Void)?
+    /// How long a busy demo runner takes to finish its job after stop-after-job; tests shorten it.
+    @ObservationIgnored var demoDrainDelay: Duration = .seconds(4)
 
     static var supportDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -429,6 +431,7 @@ final class AppModel {
             drainingRunnerIDs.insert(runner.id)
             record(title: "Will stop after the current job", runnerID: runner.id, detail: runner.runner.name)
             if runner.status == .idle { runAction(.stop, on: runner) }
+            else if demoMode && runner.status == .busy { simulateJobFinish(for: runner.id) }
             return
         }
         if action == .delete {
@@ -839,7 +842,7 @@ final class AppModel {
         guard let index = runners.firstIndex(where: { $0.id == runner.id }) else { return }
         switch action {
         case .start: runners[index].status = .idle
-        case .stop: runners[index].status = .stopped
+        case .stop: runners[index].status = .stopped; runners[index].processID = nil; runners[index].currentJob = nil
         case .enable: runners[index].isEnabled = true; runners[index].status = .stopped
         case .disable: runners[index].isEnabled = false; runners[index].status = .disabled
         case .delete: runners.remove(at: index)
@@ -847,6 +850,24 @@ final class AppModel {
         }
         if [.start, .stop, .disable, .delete].contains(action) { drainingRunnerIDs.remove(runner.id) }
         record(title: "Demo runner updated", runnerID: runner.id)
+    }
+
+    /// Demo jobs never end on their own, so a busy demo runner with a stop-after-job request finishes
+    /// its job successfully after a short pause and then takes the normal idle-stop path.
+    private func simulateJobFinish(for runnerID: String) {
+        let delay = demoDrainDelay
+        Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, drainingRunnerIDs.contains(runnerID),
+                  let index = runners.firstIndex(where: { $0.id == runnerID }), runners[index].status == .busy else { return }
+            if let jobID = runners[index].currentJob?.id, let jobIndex = jobs.firstIndex(where: { $0.id == jobID }) {
+                jobs[jobIndex].outcome = .success
+                jobs[jobIndex].finishedAt = Date()
+            }
+            runners[index].currentJob = nil
+            runners[index].status = .idle
+            processDrainRequests()
+        }
     }
 
     private func loadDemo() {
