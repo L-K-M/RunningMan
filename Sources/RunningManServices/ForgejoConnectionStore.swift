@@ -27,47 +27,32 @@ public extension ForgejoTokenProviding {
     func invalidateToken(for serverURL: URL) async {}
 }
 
-/// One credential per HTTPS origin. Credentials never enter preferences, argv or diagnostics.
-public actor ForgejoConnectionStore: ForgejoTokenProviding {
-    private let service = "com.runningman.forgejo-api"
-    public init() {}
-    public static func origin(for url: URL) throws -> URL {
-        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              parts.scheme?.lowercased() == "https", let host = parts.host, !host.isEmpty,
-              parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
-              parts.path.isEmpty || parts.path == "/" else {
-            throw ForgejoAPIError("Use an HTTPS Forgejo server root URL without credentials, a path or query parameters.")
-        }
-        parts.scheme = "https"; parts.host = host.lowercased(); parts.path = ""
-        if parts.port == 443 { parts.port = nil }
-        guard let origin = parts.url else { throw ForgejoAPIError("The Forgejo server URL is invalid.") }
-        return origin
+public protocol ForgejoTokenSaving: Sendable {
+    func setToken(_ token: String, for serverURL: URL) async throws
+}
+
+/// Holds one typed token in memory so a connection can be verified before anything is saved.
+struct EphemeralForgejoToken: ForgejoTokenProviding {
+    let origin: URL
+    let token: String
+    func token(for serverURL: URL) async throws -> String? {
+        try ForgejoConnectionStore.origin(for: serverURL) == origin ? token : nil
     }
-    public func setToken(_ token: String, for serverURL: URL) throws {
-        let key = try Self.origin(for: serverURL).absoluteString
-        let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.count <= 4096, !value.contains("\n"), !value.contains("\r") else {
-            throw ForgejoAPIError("Enter a valid Forgejo access token.")
-        }
+}
+
+/// Secret persistence below the store: the login Keychain in the app, an in-memory fake in tests.
+protocol ForgejoSecretStorage: Sendable {
+    func read(account: String) throws -> String?
+    func write(_ value: String, account: String) throws
+    func delete(account: String) throws
+}
+
+private struct KeychainSecretStorage: ForgejoSecretStorage {
+    let service: String
+    func read(account: String) throws -> String? {
         #if canImport(Security)
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service, kSecAttrAccount as String: key]
-        let attributes: [String: Any] = [kSecValueData as String: Data(value.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
-        let result = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if result == errSecItemNotFound {
-            var addition = query; attributes.forEach { addition[$0.key] = $0.value }
-            guard SecItemAdd(addition as CFDictionary, nil) == errSecSuccess else { throw ForgejoAPIError("Could not save the Forgejo token in your login Keychain.") }
-        } else if result != errSecSuccess { throw ForgejoAPIError("Could not update the Forgejo token in your login Keychain.") }
-        #else
-        throw ForgejoAPIError("Forgejo credentials require the macOS Keychain.")
-        #endif
-    }
-    public func token(for serverURL: URL) throws -> String? {
-        let key = try Self.origin(for: serverURL).absoluteString
-        #if canImport(Security)
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service, kSecAttrAccount as String: key,
+            kSecAttrService as String: service, kSecAttrAccount as String: account,
             kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -80,14 +65,82 @@ public actor ForgejoConnectionStore: ForgejoTokenProviding {
         return nil
         #endif
     }
-    public func removeToken(for serverURL: URL) throws {
-        let key = try Self.origin(for: serverURL).absoluteString
+    func write(_ value: String, account: String) throws {
         #if canImport(Security)
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service, kSecAttrAccount as String: key]
+            kSecAttrService as String: service, kSecAttrAccount as String: account]
+        let attributes: [String: Any] = [kSecValueData as String: Data(value.utf8),
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        let result = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if result == errSecItemNotFound {
+            var addition = query; attributes.forEach { addition[$0.key] = $0.value }
+            guard SecItemAdd(addition as CFDictionary, nil) == errSecSuccess else { throw ForgejoAPIError("Could not save the Forgejo token in your login Keychain.") }
+        } else if result != errSecSuccess { throw ForgejoAPIError("Could not update the Forgejo token in your login Keychain.") }
+        #else
+        throw ForgejoAPIError("Forgejo credentials require the macOS Keychain.")
+        #endif
+    }
+    func delete(account: String) throws {
+        #if canImport(Security)
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: account]
         let result = SecItemDelete(query as CFDictionary)
         guard result == errSecSuccess || result == errSecItemNotFound else { throw ForgejoAPIError("Could not remove the Forgejo token from Keychain.") }
         #endif
+    }
+}
+
+/// One credential per HTTPS origin. Credentials never enter preferences, argv or diagnostics.
+public actor ForgejoConnectionStore: ForgejoTokenProviding, ForgejoTokenSaving {
+    private let storage: any ForgejoSecretStorage
+    /// Tokens read or saved in this session, keyed by origin. Status checks and
+    /// queue monitoring run every few seconds, and each Keychain read can raise an
+    /// access prompt for an ad-hoc signed build, so the Keychain is read once per
+    /// origin until a token is replaced, removed or rejected with HTTP 401.
+    private var cachedTokens: [String: String] = [:]
+    public init() { storage = KeychainSecretStorage(service: "com.runningman.forgejo-api") }
+    init(storage: any ForgejoSecretStorage) { self.storage = storage }
+    public static func origin(for url: URL) throws -> URL {
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              parts.scheme?.lowercased() == "https", let host = parts.host, !host.isEmpty,
+              parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
+              parts.path.isEmpty || parts.path == "/" else {
+            throw ForgejoAPIError("Use an HTTPS Forgejo server root URL without credentials, a path or query parameters.")
+        }
+        parts.scheme = "https"; parts.host = host.lowercased(); parts.path = ""
+        if parts.port == 443 { parts.port = nil }
+        guard let origin = parts.url else { throw ForgejoAPIError("The Forgejo server URL is invalid.") }
+        return origin
+    }
+    /// The form in which a typed token is both verified and saved.
+    static func validatedToken(_ token: String) throws -> String {
+        let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.count <= 4096, !value.contains("\n"), !value.contains("\r") else {
+            throw ForgejoAPIError("Enter a valid Forgejo access token.")
+        }
+        return value
+    }
+    public func setToken(_ token: String, for serverURL: URL) throws {
+        let key = try Self.origin(for: serverURL).absoluteString
+        let value = try Self.validatedToken(token)
+        try storage.write(value, account: key)
+        cachedTokens[key] = value
+    }
+    public func token(for serverURL: URL) throws -> String? {
+        let key = try Self.origin(for: serverURL).absoluteString
+        if let cached = cachedTokens[key] { return cached }
+        guard let value = try storage.read(account: key) else { return nil }
+        cachedTokens[key] = value
+        return value
+    }
+    public func invalidateToken(for serverURL: URL) {
+        guard let key = try? Self.origin(for: serverURL).absoluteString else { return }
+        cachedTokens[key] = nil
+    }
+    public func removeToken(for serverURL: URL) throws {
+        let key = try Self.origin(for: serverURL).absoluteString
+        cachedTokens[key] = nil
+        try storage.delete(account: key)
     }
 }
 

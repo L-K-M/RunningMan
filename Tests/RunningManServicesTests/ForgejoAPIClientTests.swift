@@ -55,6 +55,32 @@ private final class ForgejoFixtureProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+/// Stands in for the login Keychain; tests never touch the real one.
+private final class CountingSecretStorage: ForgejoSecretStorage, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: String]
+    private var reads = 0
+    private var writes = 0
+    init(_ values: [String: String] = [:]) { self.values = values }
+    var readCount: Int { lock.withLock { reads } }
+    var writeCount: Int { lock.withLock { writes } }
+    func read(account: String) throws -> String? { lock.withLock { reads += 1; return values[account] } }
+    func write(_ value: String, account: String) throws { lock.withLock { writes += 1; values[account] = value } }
+    func delete(account: String) throws { lock.withLock { values[account] = nil } }
+}
+
+private actor CountingTokenSaver: ForgejoTokenSaving {
+    private var saved: [String] = []
+    func setToken(_ token: String, for serverURL: URL) { saved.append(token) }
+    func tokens() -> [String] { saved }
+}
+
+private struct RefusingExecutor: ProcessExecuting {
+    func run(_ request: ProcessRequest) async throws -> ProcessResult {
+        XCTFail("Connecting must not run commands"); throw CancellationError()
+    }
+}
+
 private func fixtureClient(tokens: any ForgejoTokenProviding) -> ForgejoAPIClient {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [ForgejoFixtureProtocol.self]
@@ -174,5 +200,69 @@ final class ForgejoAPIClientTests: XCTestCase {
             XCTAssertNil(error?.statusCode)
             XCTAssertTrue(error?.message.contains("certificate") == true, error?.message ?? "")
         }
+    }
+
+    func testSavedTokenIsReadOnceAndReloadedAfterTheServerRejectsIt() async throws {
+        let storage = CountingSecretStorage(["https://forge.example": "fixture-secret-value"])
+        let client = fixtureClient(tokens: ForgejoConnectionStore(storage: storage))
+        for _ in 0..<3 { _ = try await client.request(path: "user", serverURL: server) }
+        XCTAssertEqual(storage.readCount, 1)
+        ForgejoFixtureProtocol.reset(FixtureReply(status: 401), FixtureReply())
+        let rejected = await apiError(client)
+        XCTAssertEqual(rejected?.statusCode, 401)
+        _ = try await client.request(path: "user", serverURL: server)
+        XCTAssertEqual(storage.readCount, 2)
+        XCTAssertEqual(ForgejoFixtureProtocol.observed()?.value(forHTTPHeaderField: "Authorization"), "token fixture-secret-value")
+    }
+    func testSavingAndForgettingATokenUpdateTheCache() async throws {
+        let storage = CountingSecretStorage()
+        let store = ForgejoConnectionStore(storage: storage)
+        let typed = URL(string: "https://Forge.Example:443/")!
+        try await store.setToken("  replacement-value \n", for: typed)
+        let saved = try await store.token(for: server)
+        XCTAssertEqual(saved, "replacement-value")
+        XCTAssertEqual(storage.readCount, 0, "A token saved in this session is not read back from the Keychain")
+        try await store.removeToken(for: typed)
+        let removed = try await store.token(for: server)
+        XCTAssertNil(removed)
+        XCTAssertEqual(storage.readCount, 1)
+        do { try await store.setToken("first\nsecond", for: server); XCTFail("Expected a malformed token to be refused") } catch {}
+        XCTAssertEqual(storage.writeCount, 1)
+    }
+
+    private func installer(savedTokens: any ForgejoTokenProviding) -> ForgejoRunnerInstaller {
+        ForgejoRunnerInstaller(homeDirectory: FileManager.default.temporaryDirectory, executor: RefusingExecutor(),
+                               api: fixtureClient(tokens: savedTokens), candidateAPI: { fixtureClient(tokens: $0) })
+    }
+    func testRejectedCandidateTokenIsNeverSavedAndLeavesTheSavedTokenAlone() async {
+        ForgejoFixtureProtocol.reset(FixtureReply(status: 401))
+        let savedTokens = FixtureTokenStore()
+        let saver = CountingTokenSaver()
+        do { _ = try await installer(savedTokens: savedTokens).connect(serverURL: server, candidateToken: " candidate-value ", savingTo: saver); XCTFail("Expected rejection") }
+        catch {
+            XCTAssertEqual((error as? ForgejoAPIError)?.statusCode, 401)
+            XCTAssertFalse(error.localizedDescription.contains("candidate-value"))
+        }
+        XCTAssertEqual(ForgejoFixtureProtocol.observed()?.value(forHTTPHeaderField: "Authorization"), "token candidate-value")
+        let saved = await saver.tokens(); XCTAssertTrue(saved.isEmpty)
+        let hosts = await savedTokens.hosts(); XCTAssertTrue(hosts.isEmpty, "The saved token is not consulted for a typed token")
+    }
+    func testAcceptedCandidateTokenIsSavedAfterVerification() async throws {
+        let savedTokens = FixtureTokenStore()
+        let saver = CountingTokenSaver()
+        let login = try await installer(savedTokens: savedTokens).connect(serverURL: server, candidateToken: "candidate-value\n", savingTo: saver)
+        XCTAssertEqual(login, "fixture-user")
+        XCTAssertEqual(ForgejoFixtureProtocol.observed()?.value(forHTTPHeaderField: "Authorization"), "token candidate-value")
+        let saved = await saver.tokens(); XCTAssertEqual(saved, ["candidate-value"])
+        let hosts = await savedTokens.hosts(); XCTAssertTrue(hosts.isEmpty)
+    }
+    func testEmptyCandidateChecksTheSavedConnection() async throws {
+        let savedTokens = FixtureTokenStore()
+        let saver = CountingTokenSaver()
+        let login = try await installer(savedTokens: savedTokens).connect(serverURL: server, candidateToken: "  ", savingTo: saver)
+        XCTAssertEqual(login, "fixture-user")
+        XCTAssertEqual(ForgejoFixtureProtocol.observed()?.value(forHTTPHeaderField: "Authorization"), "token fixture-secret-value")
+        let saved = await saver.tokens(); XCTAssertTrue(saved.isEmpty)
+        let hosts = await savedTokens.hosts(); XCTAssertEqual(hosts, ["https://forge.example"])
     }
 }

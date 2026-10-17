@@ -93,7 +93,7 @@ runs-on: [self-hosted, macOS]
 
 ## Forgejo runners
 
-Choose **New Runner → Forgejo**, enter your HTTPS server URL, and connect with a Forgejo access token. The token is saved in your login Keychain. Repository, organization, personal-account and instance registration scopes are supported; the token needs runner-management permission for the selected scope. Forgejo 15 or later and Forgejo Runner 13.2 or later are required for this setup flow.
+Choose **New Runner → Forgejo**, enter your HTTPS server URL, and connect with a Forgejo access token. RunningMan checks the token with your server first and saves it in your login Keychain only if the server accepts it. Repository, organization, personal-account and instance registration scopes are supported; the token needs runner-management permission for the selected scope. Forgejo 15 or later and Forgejo Runner 13.2 or later are required for this setup flow.
 
 RunningMan installs the checksummed Homebrew core `forgejo-runner` package when needed and copies its native binary into the new runner directory. It uses its own user LaunchAgent rather than starting a global Homebrew service. Install Homebrew first. JavaScript workflow actions also need a compatible Node.js installation on the Mac; the runner package does not bundle it.
 

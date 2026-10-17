@@ -84,20 +84,41 @@ public actor ForgejoRunnerInstaller {
     private let homeDirectory: URL
     private let executor: any ProcessExecuting
     private let api: any ForgejoAPIRequesting
+    /// Builds the one-shot client that tries a typed token without saving it.
+    private let candidateAPI: @Sendable (any ForgejoTokenProviding) -> any ForgejoAPIRequesting
     private let brewOverride: String?
     public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
                 api: any ForgejoAPIRequesting = ForgejoAPIClient()) {
         self.homeDirectory = homeDirectory.standardizedFileURL; self.executor = SystemProcessExecutor()
-        self.api = api; self.brewOverride = nil
+        self.api = api; self.candidateAPI = { ForgejoAPIClient(tokens: $0) }; self.brewOverride = nil
     }
-    init(homeDirectory: URL, executor: any ProcessExecuting, api: any ForgejoAPIRequesting, brewPath: String = "/opt/homebrew/bin/brew") {
-        self.homeDirectory = homeDirectory.standardizedFileURL; self.executor = executor; self.api = api; self.brewOverride = brewPath
+    init(homeDirectory: URL, executor: any ProcessExecuting, api: any ForgejoAPIRequesting, brewPath: String = "/opt/homebrew/bin/brew",
+         candidateAPI: @escaping @Sendable (any ForgejoTokenProviding) -> any ForgejoAPIRequesting = { ForgejoAPIClient(tokens: $0) }) {
+        self.homeDirectory = homeDirectory.standardizedFileURL; self.executor = executor; self.api = api
+        self.candidateAPI = candidateAPI; self.brewOverride = brewPath
     }
     public func account(serverURL: URL) async throws -> String {
-        let data = try await api.request(path: "/user", serverURL: serverURL, method: "GET", body: nil)
+        try Self.login(from: await api.request(path: "/user", serverURL: serverURL, method: "GET", body: nil))
+    }
+    /// Returns the signed-in account. An empty `candidateToken` checks the saved
+    /// connection. A typed token is verified with a one-shot client and saved only
+    /// after Forgejo accepts it, so a typo or under-scoped token never replaces a
+    /// working one or stays behind for a server that was never added.
+    public func connect(serverURL: URL, candidateToken: String, savingTo store: any ForgejoTokenSaving) async throws -> String {
+        guard !candidateToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return try await account(serverURL: serverURL) }
+        let origin = try ForgejoConnectionStore.origin(for: serverURL)
+        let token = try ForgejoConnectionStore.validatedToken(candidateToken)
+        let login = try await account(serverURL: origin, candidateToken: token)
+        try await store.setToken(token, for: origin)
+        return login
+    }
+    private func account(serverURL origin: URL, candidateToken token: String) async throws -> String {
+        let candidate = candidateAPI(EphemeralForgejoToken(origin: origin, token: token))
+        return try Self.login(from: await candidate.request(path: "/user", serverURL: origin, method: "GET", body: nil))
+    }
+    private static func login(from data: Data) throws -> String {
         struct User: Decodable { var login: String }
-        let user = try JSONDecoder().decode(User.self, from: data)
-        return SecretRedactor.redact(user.login)
+        return SecretRedactor.redact(try JSONDecoder().decode(User.self, from: data).login)
     }
     public func create(_ request: CreateForgejoRunnerRequest, progress: @escaping @Sendable (String) -> Void) async throws -> InstalledRunner {
         let location = try ForgejoRegistrationLocation(serverURL: request.serverURL, scope: request.scope, scopeName: request.scopeName)
