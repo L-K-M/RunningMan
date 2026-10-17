@@ -643,6 +643,8 @@ final class AppModel {
                          startsAtLogin: $0.startsAtLogin, enabled: $0.isEnabled)
         }, jobs: jobs.map {
             var job = $0
+            // A job seen without its dispatch line has an id built from its raw name.
+            job.id = redact(job.id)
             job.name = redact(job.name); job.repository = job.repository.map(redact); job.workflow = job.workflow.map(redact)
             job.runURL = exportable(job.runURL)
             return job
@@ -660,7 +662,7 @@ final class AppModel {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        // Paths, ids and log keys are not redacted field by field; a token pasted into a folder
+        // Paths, runner ids and log keys are not redacted field by field; a token pasted into a folder
         // name is still caught by the token-only pass, which cannot break the JSON.
         return Data(SecretRedactor.redactTokenLiterals(String(decoding: try encoder.encode(report), as: UTF8.self)).utf8)
     }

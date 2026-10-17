@@ -126,6 +126,16 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual((report["logs"] as? [String: String])?.values.first, "listening")
     }
 
+    /// Without a dispatch line, RunnerLogMonitor builds the job id from the raw job name.
+    func testDiagnosticsReportRedactsFallbackJobIdentifiers() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let runner = InstalledRunner(name: "mac", directory: URL(fileURLWithPath: "/synthetic/runner"))
+        let job = RunnerJob(id: "\(runner.id)::1000.0::Deploy password=abc", runnerID: runner.id, name: "Deploy password=abc", startedAt: start)
+        let data = try AppModel.diagnosticsReportData(generatedAt: start, runners: [RunnerSnapshot(runner: runner, status: .idle)],
+            jobs: [job], events: [], cleanup: [], logs: [:], warnings: [])
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("abc"))
+    }
+
     func testDiagnosticsReportRedactsEachFieldOnceAndStaysValidJSON() throws {
         let start = Date(timeIntervalSince1970: 1_000)
         let runner = InstalledRunner(name: "build token=abc", directory: URL(fileURLWithPath: "/synthetic/runner"),
