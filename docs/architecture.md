@@ -12,7 +12,7 @@ RunningMan has three Swift package targets:
 
 Discovery is read-only and does not recursively crawl the user's home. It considers immediate child directories, RunningMan's managed installation root, explicitly imported directories, installation paths referenced by user LaunchAgents, and Forgejo daemons in system LaunchDaemons whose `UserName` is the current user. Canonical paths deduplicate installations. A folder used by a system service is monitored only, even if it also has a user LaunchAgent or a public descriptor, because stopping either could interrupt the system daemon. System scanning is opt-in at construction so tests with a synthetic home never see the machine's services.
 
-GitHub's runner metadata can have a UTF-8 byte-order mark. The service marker can contain an absolute plist path rather than a service label. Both are supported. The runner dependency manifest supplies its version without executing the binary.
+GitHub's runner metadata can have a UTF-8 byte-order mark. The service marker can contain an absolute plist path rather than a service label. Both are supported. The runner dependency manifest supplies its version without executing the binary. GitHub's `.runner` holds no labels, so runner creation records the requested labels in a public `.runningman-labels.json` sidecar (mode 0600, at most 16 KiB). Discovery reads it only when `.runner` lists no labels, and ignores a linked, oversized or invalid sidecar.
 
 Every live refresh batches process and launchd observations off the UI actor. Worker processes indicate a busy runner. A listener or loaded service PID indicates a running runner. Failed, truncated or timed-out observations produce uncertain state rather than an assertion that the runner is idle.
 

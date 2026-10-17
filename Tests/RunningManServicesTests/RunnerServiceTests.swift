@@ -355,6 +355,11 @@ final class InstallerFlowTests: XCTestCase {
         XCTAssertTrue(commands.contains { $0.arguments.first == "kickstart" })
         XCTAssertFalse(commands.contains { $0.arguments.joined().contains("EPHEMERAL_REG_TOKEN") })
         XCTAssertEqual(commands.filter { $0.environment["ACTIONS_RUNNER_INPUT_TOKEN"] != nil }.count, 1)
+        // GitHub's .runner has no labels, so the labels typed at creation must survive discovery.
+        let sidecar = root.appendingPathComponent(GitHubLabelSidecar.fileName).path
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: sidecar)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let discovered = await RunnerDiscovery(homeDirectory: home).discover(additionalDirectories: [root])
+        XCTAssertEqual(discovered.runners.first { $0.directory.path == root.path }?.labels, ["local-mac-release"])
     }
     func testRegistrationFailurePreservesPartialInstallationAndRedactsToken() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-installer-tests-" + UUID().uuidString).resolvingSymlinksInPath()
@@ -364,12 +369,14 @@ final class InstallerFlowTests: XCTestCase {
         let installer = GitHubRunnerInstaller(homeDirectory: home, executor: executor)
         let root = home.appendingPathComponent("created")
         do {
-            _ = try await installer.create(CreateRunnerRequest(githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: [], directory: root)) { _ in }
+            _ = try await installer.create(CreateRunnerRequest(githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: ["local-mac-release"], directory: root)) { _ in }
             XCTFail("Expected registration failure")
         } catch {
             XCTAssertFalse(error.localizedDescription.contains("EPHEMERAL_REG_TOKEN"))
             XCTAssertTrue(error.localizedDescription.contains("preserved"))
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("config.sh").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(GitHubLabelSidecar.fileName).path),
+                       "Labels are recorded only after GitHub accepted the registration")
     }
 }

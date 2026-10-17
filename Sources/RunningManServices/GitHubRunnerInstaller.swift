@@ -112,6 +112,7 @@ public actor GitHubRunnerInstaller {
             if !request.labels.isEmpty { arguments += ["--labels", request.labels.joined(separator: ",")] }
             _ = try await checked(executor, ProcessRequest(executable: "/bin/bash", arguments: arguments, directory: destination,
                 environment: ["ACTIONS_RUNNER_INPUT_TOKEN": token], timeout: 150, secrets: [token]), operation: "Register GitHub runner")
+            if !request.labels.isEmpty { try GitHubLabelSidecar.write(request.labels, to: destination) }
             let metadata = try runnerMetadata(at: destination)
             var runner = InstalledRunner(name: metadata["agentName"] as? String ?? request.name, directory: destination,
                                          githubURL: scope.url, agentID: metadata["agentId"] as? Int,
@@ -150,7 +151,7 @@ public actor GitHubRunnerInstaller {
         guard !request.name.isEmpty, request.name.count <= 64, request.name.unicodeScalars.allSatisfy(allowed.contains) else {
             throw RunnerServiceError("Runner names must use 1–64 letters, numbers, dots, underscores, or hyphens.")
         }
-        guard request.labels.count <= 100, request.labels.allSatisfy({ !$0.isEmpty && $0.count <= 256 && !$0.contains(",") && !$0.contains("\n") && !$0.contains("\r") }) else {
+        guard GitHubLabelSidecar.isValid(request.labels) else {
             throw RunnerServiceError("Use at most 100 nonempty labels without commas or newlines.")
         }
     }

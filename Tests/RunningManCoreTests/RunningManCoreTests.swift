@@ -21,7 +21,9 @@ final class RunningManCoreTests: XCTestCase {
     func testDiscoveryBOMAndAbsoluteServicePathAndImportDeduplicate() async throws {
         let installation = temporary.appendingPathComponent("actions-runner-example")
         let plist = temporary.appendingPathComponent("Library/LaunchAgents/actions.runner.example.desktop.plist")
-        try write("\u{feff}{\"agentName\":\"example-mac\",\"agentId\":42,\"gitHubUrl\":\"https://github.com/example/desktop\",\"labels\":[\"ARM64\",{\"name\":\"local-release\"}]}", to: installation.appendingPathComponent(".runner"))
+        // Like a real GitHub .runner, this one has no labels; RunningMan's sidecar does.
+        try write("\u{feff}{\"agentName\":\"example-mac\",\"agentId\":42,\"gitHubUrl\":\"https://github.com/example/desktop\",\"workFolder\":\"_work\"}", to: installation.appendingPathComponent(".runner"))
+        try write("{\"labels\":[\"local-release\",\"xcode-26\"]}", to: installation.appendingPathComponent(".runningman-labels.json"))
         let properties: [String: Any] = ["Label": "actions.runner.example.desktop", "WorkingDirectory": installation.path,
             "ProgramArguments": [installation.appendingPathComponent("runsvc.sh").path]]
         try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -36,9 +38,34 @@ final class RunningManCoreTests: XCTestCase {
         XCTAssertEqual(result.runners.count, 1)
         XCTAssertEqual(result.runners.first?.serviceLabel, "actions.runner.example.desktop")
         XCTAssertEqual(result.runners.first?.id, installation.path)
-        XCTAssertEqual(result.runners.first?.labels, ["ARM64", "local-release"])
+        XCTAssertEqual(result.runners.first?.labels, ["local-release", "xcode-26"])
         XCTAssertEqual(result.runners.first?.version, "2.400.1")
         XCTAssertTrue(result.warnings.isEmpty)
+    }
+
+    func testRunnerFileLabelsWinAndBadSidecarsAreIgnored() async throws {
+        func installation(_ name: String, metadata: String? = nil, sidecar: String? = nil) throws -> URL {
+            let directory = temporary.appendingPathComponent(name)
+            try write(metadata ?? "{\"agentName\":\"\(name)\"}", to: directory.appendingPathComponent(".runner"))
+            try write("", to: directory.appendingPathComponent("bin/Runner.Listener"))
+            if let sidecar { try write(sidecar, to: directory.appendingPathComponent(".runningman-labels.json")) }
+            return directory
+        }
+        _ = try installation("a-runner-file", metadata: "{\"agentName\":\"a-runner-file\",\"labels\":[\"ARM64\",{\"name\":\"local-release\"}]}",
+                             sidecar: "{\"labels\":[\"ignored\"]}")
+        let linked = try installation("b-linked")
+        let elsewhere = temporary.appendingPathComponent("elsewhere-labels.json")
+        try write("{\"labels\":[\"linked\"]}", to: elsewhere)
+        try FileManager.default.createSymbolicLink(at: linked.appendingPathComponent(".runningman-labels.json"), withDestinationURL: elsewhere)
+        _ = try installation("c-invalid", sidecar: "{\"labels\":[\"has,comma\"]}")
+        // 100 labels of 256 characters are each valid, but together exceed 16 KiB.
+        let longLabels = (0..<100).map { "\"" + String(format: "%03d", $0) + String(repeating: "a", count: 253) + "\"" }
+        _ = try installation("d-oversized", sidecar: "{\"labels\":[" + longLabels.joined(separator: ",") + "]}")
+        _ = try installation("e-redacted", sidecar: "{\"labels\":[\"token=fictional-value\",\"macOS\"]}")
+        let result = await RunnerDiscovery(homeDirectory: temporary).discover()
+        XCTAssertEqual(result.runners.map(\.name), ["a-runner-file", "b-linked", "c-invalid", "d-oversized", "e-redacted"])
+        XCTAssertEqual(result.runners.map(\.labels), [["ARM64", "local-release"], [], [], [], ["token=[REDACTED]", "macOS"]])
+        XCTAssertTrue(result.warnings.isEmpty, "A bad sidecar never hides the runner")
     }
 
     func testDiscoveryFindsExternalServiceButDoesNotRecursivelyScanHome() async throws {
