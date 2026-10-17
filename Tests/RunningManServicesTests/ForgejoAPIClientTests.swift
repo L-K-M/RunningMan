@@ -256,6 +256,16 @@ final class ForgejoAPIClientTests: XCTestCase {
         let saved = await saver.tokens(); XCTAssertEqual(saved, ["candidate-value"])
         let hosts = await savedTokens.hosts(); XCTAssertTrue(hosts.isEmpty)
     }
+    func testConnectedTokenServesLaterRequestsFromTheSharedStore() async throws {
+        // The app hands one store to setup, status checks and monitoring.
+        let storage = CountingSecretStorage()
+        let store = ForgejoConnectionStore(storage: storage)
+        _ = try await installer(savedTokens: store).connect(serverURL: server, candidateToken: "candidate-value", savingTo: store)
+        _ = try await fixtureClient(tokens: store).request(path: "user", serverURL: server)
+        XCTAssertEqual(ForgejoFixtureProtocol.observed()?.value(forHTTPHeaderField: "Authorization"), "token candidate-value")
+        XCTAssertEqual(storage.writeCount, 1)
+        XCTAssertEqual(storage.readCount, 0, "The verified token is cached, not read back from the Keychain")
+    }
     func testEmptyCandidateChecksTheSavedConnection() async throws {
         let savedTokens = FixtureTokenStore()
         let saver = CountingTokenSaver()
