@@ -550,7 +550,12 @@ final class AppModel {
         }
     }
 
-    func revealRunner(_ runner: InstalledRunner) { NSWorkspace.shared.open(runner.directory) }
+    func revealRunner(_ runner: InstalledRunner) {
+        // Opening a directory that LaunchServices treats as a package launches it.
+        if (try? runner.directory.resourceValues(forKeys: [.isPackageKey]).isPackage) == true {
+            NSWorkspace.shared.activateFileViewerSelecting([runner.directory])
+        } else { NSWorkspace.shared.open(runner.directory) }
+    }
     func openGitHub(_ runner: InstalledRunner) { if let url = runner.remoteURL { openServerLink(url) } }
     func openJob(_ job: RunnerJob) {
         if let url = job.runURL { openServerLink(url) }
