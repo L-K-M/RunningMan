@@ -71,6 +71,8 @@ final class AppModel {
     var drainingRunnerIDs: Set<String> = []
     var lastUpdated: Date?
     var logText = ""
+    /// Steps and output of each GitHub runner's most recent job, by runner ID.
+    var stepLogs: [String: JobStepLog] = [:]
     var showingNewRunner = false { didSet { if showingNewRunner { showMainWindow?() } } }
     var showingSettings = false
     var errorMessage: String? { didSet { if errorMessage != nil { showMainWindow?() } } }
@@ -91,12 +93,12 @@ final class AppModel {
 
     @ObservationIgnored private let discovery = RunnerDiscovery(systemDaemonsDirectory: RunnerDiscovery.systemDaemonsDirectory)
     @ObservationIgnored private let logs = RunnerLogMonitor()
-    @ObservationIgnored private let controller = RunnerServiceController()
+    @ObservationIgnored private let controller: RunnerServiceController
     @ObservationIgnored private let installer = GitHubRunnerInstaller()
-    @ObservationIgnored private let forgejoInstaller = ForgejoRunnerInstaller()
-    @ObservationIgnored private let forgejoConnections = ForgejoConnectionStore()
+    @ObservationIgnored private let forgejoInstaller: ForgejoRunnerInstaller
+    @ObservationIgnored private let forgejoConnections: ForgejoConnectionStore
     @ObservationIgnored private let forgejoLogs = ForgejoLogMonitor()
-    @ObservationIgnored private let workloadMonitor = WorkloadMonitor()
+    @ObservationIgnored private let workloadMonitor: WorkloadMonitor
     @ObservationIgnored private let cleanupMonitor = RunnerCleanupMonitor()
     @ObservationIgnored private let history: RunnerHistoryStore
     @ObservationIgnored private let eventStore: ActivityStore
@@ -121,6 +123,14 @@ final class AppModel {
 
     init(demoMode: Bool = CommandLine.arguments.contains("--demo")) {
         self.demoMode = demoMode
+        // One credential store and API client, so a token read from Keychain or saved
+        // by Connect is shared by status checks, queue monitoring and runner setup.
+        let connections = ForgejoConnectionStore()
+        let forgejoAPI = ForgejoAPIClient(tokens: connections)
+        forgejoConnections = connections
+        controller = RunnerServiceController(forgejoAPI: forgejoAPI)
+        forgejoInstaller = ForgejoRunnerInstaller(api: forgejoAPI)
+        workloadMonitor = WorkloadMonitor(forgejo: forgejoAPI)
         history = RunnerHistoryStore(fileURL: Self.supportDirectory.appendingPathComponent("jobs.json"))
         eventStore = ActivityStore(url: Self.supportDirectory.appendingPathComponent("activity.json"))
         activitySamples = RunnerActivityStore(fileURL: Self.supportDirectory.appendingPathComponent("observed-activity.json"))
@@ -175,6 +185,7 @@ final class AppModel {
             do { jobs = try await history.load() } catch { warnings = [Self.message(error)] }
             events = await eventStore.load()
             observedEventKeys = Set(events.map(ActivityIdentity.init))
+            if let notice = await history.takeRecoveryNotice() { record(title: "Could not read all saved job history", detail: notice, kind: .warning) }
             await refresh()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
@@ -213,6 +224,9 @@ final class AppModel {
         if demoMode { markUpdated(); refreshUsageIfStale(); return }
         let result = await discovery.discover(additionalDirectories: importedDirectories)
         let states = await controller.snapshots(for: result.runners, allowRemoteActivity: remoteMonitoringEnabled)
+        // Process reads in a cancelled task fail, which reads as every runner being unknown.
+        // Monitoring stops when the app quits; never record that as status changes.
+        guard !Task.isCancelled else { return }
         async let githubScan = logs.scan(runners: result.runners.filter { $0.provider == .github })
         async let forgejoScan = forgejoLogs.scan(runners: result.runners.filter { $0.provider == .forgejo })
         async let cleanupScan = cleanupMonitor.scan(runners: result.runners)
@@ -245,6 +259,7 @@ final class AppModel {
         catch { nextWarnings.append(Self.message(error)) }
         assign(\.warnings, nextWarnings)
         logTails = scan.tails
+        updateStepLogs(github.stepLogs)
         updateSelectedLog()
         for event in scan.events { record(event) }
         for runner in runners {
@@ -437,10 +452,7 @@ final class AppModel {
         do {
             let origin = try ForgejoConnectionStore.origin(for: rawURL)
             if demoMode { forgejoAccount = "octocat"; return true }
-            if !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                try await forgejoConnections.setToken(token, for: origin)
-            }
-            let account = try await forgejoInstaller.account(serverURL: origin)
+            let account = try await forgejoInstaller.connect(serverURL: origin, candidateToken: token, savingTo: forgejoConnections)
             forgejoAccount = account
             defaultForgejoServer = origin.absoluteString
             if !forgejoServers.contains(origin) { forgejoServers.append(origin) }
@@ -590,7 +602,13 @@ final class AppModel {
         }
     }
 
-    func revealRunner(_ runner: InstalledRunner) { NSWorkspace.shared.open(runner.directory) }
+    func revealRunner(_ runner: InstalledRunner) {
+        // Opening a directory that LaunchServices treats as a package launches it, so
+        // only a folder known not to be a package is opened; anything else is revealed.
+        if (try? runner.directory.resourceValues(forKeys: [.isPackageKey]).isPackage) == false {
+            NSWorkspace.shared.open(runner.directory)
+        } else { NSWorkspace.shared.activateFileViewerSelecting([runner.directory]) }
+    }
     func openGitHub(_ runner: InstalledRunner) { if let url = runner.remoteURL { openServerLink(url) } }
     func openJob(_ job: RunnerJob) {
         if let url = job.runURL { openServerLink(url) }
@@ -622,39 +640,90 @@ final class AppModel {
         panel.nameFieldStringValue = "RunningMan-diagnostics.json"
         panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        struct Report: Encodable {
-            struct State: Encodable {
-                var runner: InstalledRunner
-                var status: RunnerStatus
-                var processID: Int32?
-                var startsAtLogin: Bool
-                var enabled: Bool
-            }
-            var generatedAt: Date
-            var runners: [State]
-            var jobs: [RunnerJob]
-            var events: [ActivityEvent]
-            var cleanup: [RunnerCleanupRecord]
-            var logs: [String: String]
-            var warnings: [String]
-        }
-        let report = Report(generatedAt: Date(), runners: runners.map {
-            .init(runner: $0.runner, status: $0.status, processID: $0.processID,
-                  startsAtLogin: $0.startsAtLogin, enabled: $0.isEnabled)
-        }, jobs: jobs, events: events, cleanup: cleanupRecords, logs: logTails.mapValues(SecretRedactor.redact), warnings: warnings)
+        let generatedAt = Date(), runners = self.runners, jobs = self.jobs, events = self.events
+        let cleanup = cleanupRecords, logs = logTails, warnings = self.warnings
         Task {
             do {
                 try await Task.detached {
-                    let encoder = JSONEncoder()
-                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                    encoder.dateEncodingStrategy = .iso8601
-                    let data = try encoder.encode(report)
-                    let scrubbed = SecretRedactor.redact(String(decoding: data, as: UTF8.self))
-                    try Data(scrubbed.utf8).write(to: destination, options: .atomic)
+                    let data = try AppModel.diagnosticsReportData(generatedAt: generatedAt, runners: runners, jobs: jobs,
+                        events: events, cleanup: cleanup, logs: logs, warnings: warnings)
+                    try data.write(to: destination, options: .atomic)
                 }.value
                 record(title: "Diagnostics exported", detail: destination.lastPathComponent, kind: .success)
             } catch { errorMessage = Self.message(error) }
         }
+    }
+
+    /// Assigns only changed logs, so views of other runners are not invalidated on every poll.
+    private func updateStepLogs(_ next: [String: JobStepLog]) {
+        for (runnerID, log) in next where stepLogs[runnerID]?.revision != log.revision {
+            stepLogs[runnerID] = log
+        }
+        for runnerID in stepLogs.keys where next[runnerID] == nil {
+            stepLogs[runnerID] = nil
+        }
+    }
+
+    private struct DiagnosticsReport: Encodable {
+        struct State: Encodable {
+            var runner: InstalledRunner
+            var status: RunnerStatus
+            var processID: Int32?
+            var startsAtLogin: Bool
+            var enabled: Bool
+        }
+        var generatedAt: Date
+        var runners: [State]
+        var jobs: [RunnerJob]
+        var events: [ActivityEvent]
+        var cleanup: [RunnerCleanupRecord]
+        var logs: [String: String]
+        var warnings: [String]
+    }
+
+    /// Redacts each free-text field once, then encodes. Redacting the encoded JSON instead can
+    /// consume the backslash that escapes a quote, and never sees URLs because the encoder
+    /// escapes their slashes.
+    nonisolated static func diagnosticsReportData(generatedAt: Date, runners: [RunnerSnapshot], jobs: [RunnerJob],
+                                                  events: [ActivityEvent], cleanup: [RunnerCleanupRecord],
+                                                  logs: [String: String], warnings: [String]) throws -> Data {
+        let redact: (String) -> String = SecretRedactor.redact
+        let report = DiagnosticsReport(generatedAt: generatedAt, runners: runners.map {
+            var runner = $0.runner
+            runner.name = redact(runner.name); runner.labels = runner.labels.map(redact); runner.githubURL = exportable(runner.githubURL)
+            return .init(runner: runner, status: $0.status, processID: $0.processID,
+                         startsAtLogin: $0.startsAtLogin, enabled: $0.isEnabled)
+        }, jobs: jobs.map {
+            var job = $0
+            // A job seen without its dispatch line has an id built from its raw name.
+            job.id = redact(job.id)
+            job.name = redact(job.name); job.repository = job.repository.map(redact); job.workflow = job.workflow.map(redact)
+            job.runURL = exportable(job.runURL)
+            return job
+        }, events: events.map {
+            var event = $0
+            event.title = redact(event.title); event.detail = event.detail.map(redact)
+            return event
+        }, cleanup: cleanup.map {
+            var record = $0
+            record.repository = redact(record.repository); record.job = redact(record.job); record.message = record.message.map(redact)
+            record.runURL = exportable(record.runURL)
+            record.paths = record.paths.map { var path = $0; path.path = redact(path.path); path.message = path.message.map(redact); return path }
+            return record
+        }, logs: logs.mapValues(redact), warnings: warnings.map(redact))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        // Paths, runner ids and log keys are not redacted field by field; a token pasted into a folder
+        // name is still caught by the token-only pass, which cannot break the JSON.
+        return Data(SecretRedactor.redactTokenLiterals(String(decoding: try encoder.encode(report), as: UTF8.self)).utf8)
+    }
+
+    /// Remote links are exported only when they carry nothing redaction would hide.
+    private nonisolated static func exportable(_ url: URL?) -> URL? {
+        guard let url, url.user == nil, url.password == nil,
+              SecretRedactor.redact(url.absoluteString) == url.absoluteString else { return nil }
+        return url
     }
 
     private func updateSelectedLog() {
@@ -873,8 +942,64 @@ final class AppModel {
             [13:44:02 INFO] Build completed. Running tests…
             """
         }
+        stepLogs[runners[0].id] = Self.demoStepLog(runnerID: runners[0].id, jobID: "demo-job-0",
+            startedAt: jobs[0].startedAt, isFinished: false, steps: [
+                ("Set up job", 3, .success, [
+                    "Current runner version: '2.337.0'", "> Runner Image Provisioner", "  Hosted Compute Agent",
+                    "> Operating System", "  macOS", "  15.5", "Prepare workflow directory",
+                    "Prepare all required actions", "Download action repository 'actions/checkout@v4'",
+                    "Complete job name: Build & publish macOS app"]),
+                ("Run actions/checkout@v4", 4, .success, [
+                    "> Run actions/checkout@v4", "  with:", "    repository: octocat/WeatherKit", "    fetch-depth: 1",
+                    "Syncing repository: octocat/WeatherKit", "$ /usr/bin/git version", "git version 2.50.1",
+                    "> Fetching the repository", "  $ /usr/bin/git -c protocol.version=2 fetch --no-tags --depth=1 origin",
+                    "Checking out the ref", "$ /usr/bin/git log -1 --format=%H", "5e1c0a2d9b7f4c3e8a6b1d0f2e4c6a8b0d2f4e6a"]),
+                ("Restore build cache", 6, .success, [
+                    "> Run actions/cache@v4", "  with:", "    path: .build", "    key: macos-spm-example",
+                    "Cache restored from key: macos-spm-example"]),
+                ("Build app bundle", nil, .running, [
+                    "> Run scripts/build-app.sh release", "  scripts/build-app.sh release", "  shell: /bin/bash -e {0}",
+                    "Building for production...", "compile WeatherCore (24 files)", "compile WeatherKit (61 files)",
+                    "! Sources/WeatherKit/ForecastView.swift:88:13: 'foregroundColor' is deprecated: use foregroundStyle",
+                    "link WeatherKit", "compile app-icon", "codesign: build/WeatherKit.app: valid on disk"])
+            ])
+        stepLogs[runners[1].id] = Self.demoStepLog(runnerID: runners[1].id, jobID: "demo-job-1",
+            startedAt: jobs[1].startedAt, isFinished: true, steps: [
+                ("Set up job", 2, .success, ["Current runner version: '2.337.0'", "Prepare workflow directory"]),
+                ("Run actions/checkout@v4", 3, .success, ["> Run actions/checkout@v4", "Syncing repository: octocat/TrailNotes"]),
+                ("Run swift test", 41, .success, [
+                    "> Run swift test --parallel", "  swift test --parallel", "Building for debugging...",
+                    "Test Suite 'All tests' started", "Executed 128 tests, with 0 failures (0 unexpected) in 12.4 seconds"]),
+                ("Upload test results", 0, .skipped, []),
+                ("Post Run actions/checkout@v4", 1, .success, ["Post job cleanup.", "$ /usr/bin/git version", "git version 2.50.1"]),
+                ("Complete job", 1, .success, ["Cleaning up orphan processes"])
+            ])
         lastUpdated = Date()
         updateSelectedLog()
+    }
+
+    /// Fictional step output for demo mode. Line prefixes: "> " group header, "  " grouped line,
+    /// "$ " command, "! " warning.
+    private static func demoStepLog(runnerID: String, jobID: String, startedAt: Date, isFinished: Bool,
+                                    steps: [(name: String, seconds: Double?, outcome: JobStepOutcome, lines: [String])]) -> JobStepLog {
+        var lineID = 0
+        var start = startedAt
+        let built = steps.enumerated().map { index, step in
+            let finished = step.seconds.map { start.addingTimeInterval($0) }
+            let lines = step.lines.map { raw -> JobStepLine in
+                defer { lineID += 1 }
+                let date = start
+                if raw.hasPrefix("> ") { return JobStepLine(id: lineID, date: date, text: String(raw.dropFirst(2)), kind: .groupHeader) }
+                if raw.hasPrefix("  ") { return JobStepLine(id: lineID, date: date, text: String(raw.dropFirst(2)), isGrouped: true) }
+                if raw.hasPrefix("$ ") { return JobStepLine(id: lineID, date: date, text: String(raw.dropFirst(2)), kind: .command) }
+                if raw.hasPrefix("! ") { return JobStepLine(id: lineID, date: date, text: String(raw.dropFirst(2)), kind: .warning) }
+                return JobStepLine(id: lineID, date: date, text: raw)
+            }
+            defer { start = finished ?? start }
+            return JobStep(id: index, name: step.name, startedAt: start, finishedAt: finished, outcome: step.outcome, lines: lines)
+        }
+        return JobStepLog(jobID: jobID, runnerID: runnerID, isFinished: isFinished, hasOutput: true,
+                          isTruncated: false, revision: 1, steps: built)
     }
 }
 
