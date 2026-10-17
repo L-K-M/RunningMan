@@ -77,6 +77,8 @@ History merges retain confirmed completion results and enrich names, repositorie
 
 History has a 2,000-job and 6 MiB encoded limit. Activity has a 500-event limit and stable logical identities, so reparsing historical diagnostics after app relaunch does not duplicate activity. Both are private local files written atomically. Clearing saved history does not remove runner diagnostics.
 
+A history or observed-activity file that cannot be decoded is renamed beside the original as `<name>.invalid-<yyyyMMdd-HHmmss>.json`, never deleted, and that store starts empty. An outcome value this build does not know, for example from a newer build, reads as unknown. Individual invalid history records are left out after the original file is copied aside the same way, and Activity reports a history recovery once. Overlapping observed intervals from older builds or clock corrections are clamped instead of counted twice, and observation resumes once a corrected clock passes the saved coverage.
+
 ## Verification
 
 Core and service tests use synthetic metadata, diagnostic lines, fake command executors and temporary home directories. They must not start, stop, disable or unregister a real runner.

@@ -89,6 +89,11 @@ public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
 public enum JobOutcome: String, Codable, CaseIterable, Sendable {
     case running, success, failure, cancelled, unknown
     public var title: String { rawValue.capitalized }
+    /// A value this build does not know (for example history written by a newer build)
+    /// reads as unknown instead of failing the whole record. Encoding is unchanged.
+    public init(from decoder: Decoder) throws {
+        self = JobOutcome(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
 }
 
 public struct RunnerJob: Identifiable, Codable, Hashable, Sendable {
