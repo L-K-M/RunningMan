@@ -42,6 +42,11 @@ final class DesignSystemTests: XCTestCase {
         XCTAssertEqual(tone.resolved(for: darkAqua), tone.dark)
         let vibrantDark = try XCTUnwrap(NSAppearance(named: .vibrantDark))
         XCTAssertEqual(tone.resolved(for: vibrantDark), tone.dark, "Dark variants such as vibrant dark resolve to the dark value")
+        // Increase Contrast uses its own appearances; they must keep their light or dark side.
+        let highContrastLight = try XCTUnwrap(NSAppearance(named: .accessibilityHighContrastAqua))
+        let highContrastDark = try XCTUnwrap(NSAppearance(named: .accessibilityHighContrastDarkAqua))
+        XCTAssertEqual(tone.resolved(for: highContrastLight), tone.light)
+        XCTAssertEqual(tone.resolved(for: highContrastDark), tone.dark)
     }
 
     /// Unknown blocks interruption, so it must not look like a runner that is merely
