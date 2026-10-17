@@ -144,6 +144,11 @@ final class AppModel {
             section = .runners
             showMainWindow?()
         }
+        // A permission prompt dismissed without an answer leaves macOS undecided, and enabled
+        // kinds would then be dropped silently on every launch. Ask again while undecided.
+        if notifier.isActive && notificationPreferences.isAnyEnabled {
+            Task { [weak self] in await self?.requestNotificationAuthorization() }
+        }
     }
 
     var selectedRunner: RunnerSnapshot? { runners.first { $0.id == selectedRunnerID } }
