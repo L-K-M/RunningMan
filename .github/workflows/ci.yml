@@ -9,9 +9,11 @@ name: Native macOS app
 permissions:
   contents: read
 
+# Cancel an in-progress run when a *PR branch* is pushed again — but never a
+# push to main, or that commit keeps a permanently "cancelled" status.
 concurrency:
   group: native-app-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   app:
@@ -20,6 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Full history: CFBundleVersion is the commit count (build-app.sh).
+          fetch-depth: 0
           persist-credentials: false
       - name: Show toolchain
         run: |
@@ -33,11 +37,8 @@ jobs:
         run: |
           lipo "dist/RunningMan.app/Contents/MacOS/RunningMan" -verify_arch arm64 x86_64
       - name: Render isolated preview
-        # The demo-mode snapshot needs a real window server; it captures the four
-        # views in ~6s on a desktop but currently stalls on the hosted runner.
-        # Bounded and non-blocking so it cannot hold CI red while that is sorted;
-        # the screenshots upload step still publishes whatever it produced.
-        continue-on-error: true
+        # Blocking, because the release workflow runs the same step. The script
+        # fails after two minutes if the capture stalls; this is a backstop.
         timeout-minutes: 4
         run: scripts/smoke-test.sh
       - name: Upload app
