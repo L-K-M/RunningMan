@@ -563,6 +563,7 @@ FEAT-1 (notifications) is in PR #17; its remaining extras are APP-21.
 
 **FEAT-3 Job detail** (High, M) [I]
 - Clicking a job opens timings, typical duration and delta, the last 10 runs (Swift Charts), a redacted log excerpt from the job's time window (from the existing 64 KB tail only; never read more raw files), Open run, Copy link and Show runner.
+- The runner detail's Job log tab now reads `_diag/pages` for the most recent job's step output (see docs/architecture.md). This intentionally goes beyond "never read more raw files" for that one view; job detail can reuse that log for the most recent job instead of the diagnostic tail.
 
 **FEAT-4 Remote health** (High, S) [I]
 - The workload monitor already downloads the runner list (`status` online/offline, `busy`). Show "Server sees: Offline" and an attention badge when a locally running runner is offline for two consecutive reads. Annotation only; never change local status from remote data alone.

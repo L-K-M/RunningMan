@@ -21,6 +21,7 @@ The preview above uses fictional runners and jobs.
 - **Finish the job first.** Stop a busy runner after its current job finishes; cancel that request any time. RunningMan must remain open until it stops the runner.
 - **Create and remove.** Register a repository or organization runner from its GitHub URL, download and verify the official runner, and install its user service. Unregister existing runners without deleting their workspaces.
 - **Job history.** Search and filter locally recorded jobs, see outcomes and durations, and jump to their GitHub run when its URL is available.
+- **Job log.** Follow a GitHub runner's current job step by step, like the log on GitHub, read from the runner's local files with secrets redacted.
 - **Live diagnostics.** Search and follow redacted logs, reveal installations in Finder, and export a diagnostic report.
 - **Menu-bar access.** Check the fleet and manage runners even after closing the main window.
 - **Keep builds awake.** Optionally prevent idle sleep while a job is running. Closing the lid can still put a laptop to sleep.
@@ -130,6 +131,8 @@ The reports live in the runner work directory's **.runningman-cleanup/** folder.
 History is recovered from available local Runner and Worker diagnostics, then saved in **~/Library/Application Support/RunningMan/**. It is not a complete GitHub audit log. Rotated or deleted diagnostics cannot recover jobs that RunningMan has never seen.
 
 Unfinished jobs without evidence of a current worker show **Unknown**, with no invented completion time. Records with confirmed outcomes keep them when older logs are scanned again. Up to 2,000 jobs and 500 activity events are retained, with bounded log tails and incremental background reads.
+
+The **Job log** tab shows the steps and output of a GitHub runner's most recent job while RunningMan is open. The runner uploads and deletes its output files during the job, so output from before RunningMan started, or from a gap between reads, is not shown; open the run on GitHub for the complete log. Output is kept in memory only, until the runner's next job. Forgejo runners send step output straight to the server, so the tab is not available for them.
 
 Registration credentials are never read. Common credential formats and explicit operation tokens are redacted from displayed or exported logs. Diagnostic exports include runner names, repository names and local paths.
 

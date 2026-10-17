@@ -140,12 +140,14 @@ struct RunnerDetailView: View {
                 }
                 Picker("Runner details", selection: $tab) {
                     Text("Overview").tag("Overview")
+                    Text("Job log").tag("Job log")
                     Text("Live log").tag("Live log")
                     Text("Jobs (\(model.jobs(for: snapshot.id).count))").tag("Jobs")
                 }.pickerStyle(.segmented).labelsHidden()
             }.padding(24)
             Divider()
             switch tab {
+            case "Job log": JobLogView(snapshot: snapshot)
             case "Live log": logView
             case "Jobs": jobsView
             default: overview
@@ -170,6 +172,11 @@ struct RunnerDetailView: View {
                                     .help(job.finishedAt == nil ? "No completion result in local logs" : "Recorded job duration")
                             }
                         }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 3)
+                        if let step = model.stepLogs[snapshot.id].flatMap({ $0.jobID == job.id ? $0.steps.last { $0.outcome == .running } : nil }) {
+                            Button { tab = "Job log" } label: {
+                                Label("Current step: \(step.name)", systemImage: "list.bullet.rectangle").lineLimit(1)
+                            }.buttonStyle(.link).font(.system(size: 11)).padding(.top, 6).help("Show the job log")
+                        }
                         if isControllable {
                             Button(model.drainingRunnerIDs.contains(snapshot.id) ? "Cancel stop when idle" : "Stop when idle", systemImage: "moon.zzz") { model.perform(.drain, on: snapshot) }
                                 .controlSize(.small).padding(.top, 11)
