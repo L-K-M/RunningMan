@@ -6,31 +6,46 @@ import RunningManCore
 private actor QueueExecutor: ProcessExecuting {
     var calls: [String] = []
     let responses: [String: String]
+    let errors: [String: String]
     let error: String?
-    init(responses: [String: String] = [:], error: String? = nil) { self.responses = responses; self.error = error }
+    init(responses: [String: String] = [:], errors: [String: String] = [:], error: String? = nil) {
+        self.responses = responses; self.errors = errors; self.error = error
+    }
     func run(_ request: ProcessRequest) async throws -> ProcessResult {
         let path = request.arguments.last ?? ""; calls.append(path)
         if let error { return ProcessResult(status: 1, output: "", error: error) }
+        if let error = errors[path] { return ProcessResult(status: 1, output: "", error: error) }
         if let value = responses[path] { return ProcessResult(status: 0, output: value, error: "") }
         if path.contains("/actions/runs?") { return ProcessResult(status: 0, output: #"{"total_count":0,"workflow_runs":[]}"#, error: "") }
         return ProcessResult(status: 1, output: "", error: "not in fixture")
     }
     func count() -> Int { calls.count }
+    func requested() -> [String] { calls }
 }
 private actor QueueForgejo: ForgejoAPIRequesting {
     let responses: [String: String]
     var hosts: [String] = []
+    var paths: [String] = []
     init(responses: [String: String] = [:]) { self.responses = responses }
+    func requested() -> [String] { paths }
     func request(path: String, serverURL: URL, method: String, body: Data?) async throws -> Data {
-        hosts.append(serverURL.host ?? "")
+        hosts.append(serverURL.host ?? ""); paths.append(path)
         if let value = responses[path] { return Data(value.utf8) }
         if path.contains("/actions/runs?") { return Data(#"{"total_count":0,"workflow_runs":[]}"#.utf8) }
         throw ForgejoAPIError("Unavailable fixture endpoint", statusCode: 404)
     }
 }
 final class WorkloadMonitorTests: XCTestCase {
+    /// Runner folders live in a per-test root that is never created, so reading a
+    /// descriptor can never pick up a stray file from the machine.
+    private var root: URL!
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-workload-" + UUID().uuidString)
+    }
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: root) }
+    private func json(_ object: Any) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self) }
     private func runner(labels: [String] = [], provider: RunnerProvider = .github) -> InstalledRunner {
-        InstalledRunner(name: "mac", directory: URL(fileURLWithPath: "/tmp/fictional-mac"),
+        InstalledRunner(name: "mac", directory: root.appendingPathComponent("fictional-mac"),
             githubURL: URL(string: provider == .github ? "https://github.com/example/project" : "https://forge.example/example/project"),
             agentID: 9, labels: labels, provider: provider, capacity: provider == .github ? 1 : 3)
     }
@@ -61,7 +76,7 @@ final class WorkloadMonitorTests: XCTestCase {
     func testUnknownLabelsDoNotBecomeAZeroQueue() async {
         let fake = QueueExecutor(responses: [
             "repos/example/project/actions/runs?status=queued&per_page=20&page=1": #"{"total_count":1,"workflow_runs":[{"id":11}]}"#,
-            "repos/example/project/actions/runs/11/jobs?per_page=100&page=1&filter=latest": #"{"total_count":1,"jobs":[{"id":1,"status":"queued","labels":["macOS"]}]}"#
+            "repos/example/project/actions/runs/11/jobs?per_page=100&page=1&filter=latest": #"{"total_count":1,"jobs":[{"id":1,"status":"queued","labels":["self-hosted","gpu"]}]}"#
         ])
         let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo()).refresh(runners: [runner()]).scopes[0]
         XCTAssertEqual(scope.state, .partial); XCTAssertNil(scope.queuedCount); XCTAssertTrue(scope.jobs.isEmpty)
@@ -97,7 +112,7 @@ final class WorkloadMonitorTests: XCTestCase {
     func testBusyOrganizationCannotStarveLaterScopesForever() async throws {
         var responses: [String: String] = [
             "orgs/a-org/actions/runners?per_page=100&page=1": #"{"runners":[{"id":9,"labels":[{"name":"macOS"}]}]}"#,
-            "orgs/a-org/repos?type=all&per_page=100&page=1": #"[{"full_name":"a-org/one"},{"full_name":"a-org/two"}]"#,
+            "orgs/a-org/repos?type=all&sort=pushed&direction=desc&per_page=100&page=1":#"[{"full_name":"a-org/one"},{"full_name":"a-org/two"}]"#,
             "repos/z-owner/project/actions/runners?per_page=100&page=1": #"{"runners":[{"id":10,"labels":[{"name":"macOS"}]}]}"#
         ]
         let page = String(decoding: try JSONSerialization.data(withJSONObject: ["total_count": 20, "workflow_runs": (1...20).map { ["id": $0] }]), as: UTF8.self)
@@ -108,7 +123,7 @@ final class WorkloadMonitorTests: XCTestCase {
         let fake = QueueExecutor(responses: responses)
         let monitor = WorkloadMonitor(executor: fake, forgejo: QueueForgejo())
         var first = runner(); first.remoteURL = URL(string: "https://github.com/a-org")
-        var later = runner(); later.directory = URL(fileURLWithPath: "/tmp/second-fictional-runner")
+        var later = runner(); later.directory = root.appendingPathComponent("second-fictional-runner")
         later.remoteURL = URL(string: "https://github.com/z-owner/project"); later.agentID = 10
         let initial = await monitor.refresh(runners: [first, later])
         XCTAssertEqual(initial.scopes.first { $0.scopeURL == later.remoteURL }?.state, .unavailable)
@@ -124,6 +139,145 @@ final class WorkloadMonitorTests: XCTestCase {
         ])
         let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo()).refresh(runners: [runner()]).scopes[0]
         XCTAssertNil(scope.queuedCount); XCTAssertNil(scope.compatibleQueuedJobs)
+    }
+    func testUnreadableRunnerListFallsBackToLocalAndDefaultGitHubLabels() async {
+        #if arch(arm64)
+        let architecture = "arm64"
+        #else
+        let architecture = "x64"
+        #endif
+        let fake = QueueExecutor(responses: [
+            "repos/example/project/actions/runs?status=queued&per_page=20&page=1": #"{"total_count":1,"workflow_runs":[{"id":11}]}"#,
+            "repos/example/project/actions/runs/11/jobs?per_page=100&page=1&filter=latest": #"{"total_count":4,"jobs":[{"id":1,"name":"Mac","status":"queued","labels":["self-hosted","macOS"]},{"id":2,"name":"Release","status":"queued","labels":["self-hosted","local-release"]},{"id":3,"name":"Arch","status":"queued","labels":["macos",""# + architecture + #""]},{"id":4,"name":"GPU","status":"queued","labels":["self-hosted","gpu"]}]}"#
+        ])
+        let local = runner(labels: ["local-release"])
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo()).refresh(runners: [local]).scopes[0]
+        XCTAssertEqual(scope.state, .partial)
+        XCTAssertEqual(Set(scope.jobs.map(\.name)), ["Mac", "Release", "Arch"])
+        XCTAssertEqual(Set(scope.compatibleJobs(for: local.id).map(\.name)), ["Mac", "Release", "Arch"])
+        XCTAssertTrue(scope.message?.contains("Runner labels were inferred") == true)
+        XCTAssertNil(scope.queuedCount, "Inferred labels cannot rule out jobs that need custom labels")
+    }
+    func testForbiddenOrganizationRunnerListSuggestsAdminOrgScope() async {
+        let fake = QueueExecutor(responses: [
+            "orgs/example/repos?type=all&sort=pushed&direction=desc&per_page=100&page=1": #"[{"full_name":"example/project"}]"#
+        ], errors: ["orgs/example/actions/runners?per_page=100&page=1": "gh: Resource not accessible by integration (HTTP 403)"])
+        var local = runner(); local.remoteURL = URL(string: "https://github.com/example")
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo()).refresh(runners: [local]).scopes[0]
+        XCTAssertEqual(scope.state, .partial)
+        XCTAssertTrue(scope.message?.contains("gh auth refresh -h github.com -s admin:org") == true)
+    }
+    func testOrganizationQueuesCoverRecentlyPushedUnarchivedRepositories() async throws {
+        let names = (1...10).map { "example/repo-\($0)" }
+        let list = names.enumerated().map { index, name -> [String: Any] in ["full_name": name, "archived": index == 0] }
+        let fake = QueueExecutor(responses: [
+            "orgs/example/actions/runners?per_page=100&page=1": #"{"runners":[{"id":9,"labels":[{"name":"macOS"}]}]}"#,
+            "orgs/example/repos?type=all&sort=pushed&direction=desc&per_page=100&page=1": try json(list)
+        ])
+        var local = runner(); local.remoteURL = URL(string: "https://github.com/example")
+        // The default budget covers seven repositories; a larger one shows the whole selection.
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo(), requestBudget: 60).refresh(runners: [local]).scopes[0]
+        let calls = await fake.requested()
+        let checked = Set(calls.compactMap { path in names.first { path.hasPrefix("repos/\($0)/") } })
+        XCTAssertEqual(checked, Set(names[1...8]), "Archived repositories are skipped before the eight-repository cap")
+        XCTAssertTrue(scope.message?.contains("most recently pushed") == true)
+    }
+    func testIdleOrganizationWithinTheDefaultBudgetIsAKnownZero() async throws {
+        let names = (1...10).map { "example/repo-\($0)" }
+        let fake = QueueExecutor(responses: [
+            "orgs/example/actions/runners?per_page=100&page=1": #"{"runners":[{"id":9,"labels":[{"name":"macOS"}]}]}"#,
+            "orgs/example/repos?type=all&sort=pushed&direction=desc&per_page=100&page=1": try json(names.map { ["full_name": $0] })
+        ])
+        var local = runner(); local.remoteURL = URL(string: "https://github.com/example")
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo()).refresh(runners: [local]).scopes[0]
+        XCTAssertEqual(scope.queuedCount, 0, scope.message ?? "")
+        XCTAssertFalse(scope.message?.contains("Request budget reached") == true)
+        let calls = await fake.requested()
+        XCTAssertEqual(Set(calls.compactMap { path in names.first { path.hasPrefix("repos/\($0)/") } }), Set(names[0..<7]))
+        XCTAssertTrue(scope.message?.contains("up to 7 of the most recently pushed") == true)
+    }
+    func testForgejoOrganizationQueuesPreferRecentlyUpdatedRepositories() async throws {
+        var list: [[String: Any]] = (1...9).map { ["full_name": "example/repo-\($0)", "updated_at": String(format: "2026-01-%02dT00:00:00Z", $0)] }
+        list.insert(["full_name": "example/undated"], at: 0)
+        list.append(["full_name": "example/archived", "archived": true, "updated_at": "2026-02-01T00:00:00Z"])
+        let api = QueueForgejo(responses: [
+            "orgs/example/actions/runners?limit=100&page=1&visible=true": #"[{"id":9,"labels":["macOS"],"status":"idle"}]"#,
+            "orgs/example/repos?limit=100&page=1": try json(list)
+        ])
+        var local = runner(provider: .forgejo); local.remoteURL = URL(string: "https://forge.example/example")
+        let scope = await WorkloadMonitor(executor: QueueExecutor(), forgejo: api).refresh(runners: [local]).scopes[0]
+        let paths = await api.requested()
+        let checked = Set(paths.compactMap { path -> String? in
+            guard path.hasPrefix("repos/"), let end = path.range(of: "/actions/") else { return nil }
+            return String(path[path.index(path.startIndex, offsetBy: 6)..<end.lowerBound])
+        })
+        XCTAssertEqual(checked, Set((2...9).map { "example/repo-\($0)" }))
+        XCTAssertTrue(scope.message?.contains("most recently updated") == true)
+    }
+    func testRequestBudgetIsReportedOnceAndKeepsEarlierRepositories() async {
+        let fake = QueueExecutor(responses: [
+            "orgs/example/actions/runners?per_page=100&page=1": #"{"runners":[{"id":9,"labels":[{"name":"macOS"}]}]}"#,
+            "orgs/example/repos?type=all&sort=pushed&direction=desc&per_page=100&page=1": #"[{"full_name":"example/one"},{"full_name":"example/two"},{"full_name":"example/three"}]"#,
+            "repos/example/one/actions/runs?status=queued&per_page=20&page=1": #"{"total_count":4,"workflow_runs":[{"id":11},{"id":12},{"id":13},{"id":14}]}"#,
+            "repos/example/one/actions/runs/11/jobs?per_page=100&page=1&filter=latest": #"{"total_count":1,"jobs":[{"id":1,"name":"Mac","status":"queued","labels":["macOS"]}]}"#,
+            "repos/example/one/actions/runs/12/jobs?per_page=100&page=1&filter=latest": #"{"total_count":0,"jobs":[]}"#,
+            "repos/example/one/actions/runs/13/jobs?per_page=100&page=1&filter=latest": #"{"total_count":0,"jobs":[]}"#,
+            "repos/example/one/actions/runs/14/jobs?per_page=100&page=1&filter=latest": #"{"total_count":0,"jobs":[]}"#
+        ])
+        var local = runner(); local.remoteURL = URL(string: "https://github.com/example")
+        // Runner list and repositories leave 13 requests, enough to select two repositories.
+        // The first one's five run states and four job lists then leave only four of the
+        // second's five run states before the budget runs out.
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo(), requestBudget: 15).refresh(runners: [local]).scopes[0]
+        XCTAssertEqual(scope.state, .partial)
+        XCTAssertEqual(scope.jobs.map(\.name), ["Mac"])
+        XCTAssertNil(scope.queuedCount, "Repositories skipped by the stop may hold more queued jobs")
+        let message = scope.message ?? ""
+        XCTAssertEqual(message.components(separatedBy: "Request budget reached").count, 2, message)
+        for unrelated in ["coverage is unavailable", "could not be read", "labels could not", "permission"] {
+            XCTAssertFalse(message.contains(unrelated), message)
+        }
+        let calls = await fake.requested()
+        XCTAssertFalse(calls.contains { $0.hasPrefix("repos/example/three/") })
+    }
+    func testRequestBudgetInsideWorkflowJobsIsNotReportedAsUnreadableJobs() async {
+        let fake = QueueExecutor(responses: [
+            "repos/example/project/actions/runners?per_page=100&page=1": #"{"runners":[{"id":9,"labels":[{"name":"macOS"}]}]}"#,
+            "repos/example/project/actions/runs?status=queued&per_page=20&page=1": #"{"total_count":2,"workflow_runs":[{"id":11},{"id":12}]}"#,
+            "repos/example/project/actions/runs/11/jobs?per_page=100&page=1&filter=latest": #"{"total_count":1,"jobs":[{"id":1,"name":"Mac","status":"queued","labels":["macOS"]}]}"#,
+            "repos/example/project/actions/runs/12/jobs?per_page=100&page=1&filter=latest": #"{"total_count":1,"jobs":[{"id":2,"name":"Later","status":"queued","labels":["macOS"]}]}"#
+        ])
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo(), requestBudget: 7).refresh(runners: [runner()]).scopes[0]
+        XCTAssertEqual(scope.state, .partial)
+        XCTAssertEqual(scope.jobs.map(\.name), ["Mac"])
+        XCTAssertNil(scope.queuedCount, "The unread workflow may hold more queued jobs")
+        XCTAssertTrue(scope.message?.contains("Request budget reached") == true)
+        XCTAssertFalse(scope.message?.contains("could not be read") == true)
+    }
+    func testRepositoryNameContaining429IsNotARateLimit() async {
+        let fake = QueueExecutor(errors: ["repos/example/build-429/actions/runners?per_page=100&page=1":
+            #"Get "https://api.github.com/repos/example/build-429/actions/runners?per_page=100&page=1": dial tcp: lookup api.github.com: no such host"#])
+        var local = runner(); local.remoteURL = URL(string: "https://github.com/example/build-429")
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo()).refresh(runners: [local]).scopes[0]
+        let calls = await fake.count()
+        XCTAssertEqual(calls, 6, "Run state queries continue after an unrelated runner list failure")
+        XCTAssertFalse(scope.message?.localizedCaseInsensitiveContains("rate limit") == true)
+    }
+    func testGitHubRateLimitStopsTheScopeAndSaysSo() async {
+        let fake = QueueExecutor(errors: ["repos/example/project/actions/runners?per_page=100&page=1":
+            "gh: API rate limit exceeded for user ID 1. (HTTP 403)"])
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo()).refresh(runners: [runner()]).scopes[0]
+        let calls = await fake.count()
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(scope.state, .unavailable)
+        XCTAssertTrue(scope.message?.contains("rate limit") == true)
+    }
+    func testMissingGitHubCLIAsksForInstallation() async {
+        let fake = QueueExecutor()
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo(), githubCLIPath: nil).refresh(runners: [runner()]).scopes[0]
+        XCTAssertEqual(scope.state, .unavailable)
+        XCTAssertEqual(scope.message, "Install the GitHub CLI and sign in with gh auth login to monitor GitHub queues.")
+        let calls = await fake.count(); XCTAssertEqual(calls, 0)
     }
     func testForgejoNamesAreNotRemoteIdentity() async {
         let api = QueueForgejo(responses: ["repos/example/project/actions/runners?limit=100&page=1&visible=true": #"[{"id":999,"name":"mac","labels":["wrong"],"status":"active"}]"#])

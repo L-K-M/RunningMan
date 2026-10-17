@@ -2,6 +2,10 @@
 
 A native macOS home for your self-hosted GitHub Actions and Forgejo runners.
 
+> [!IMPORTANT]
+> LLM disclosure: This codebase was written with substantial help from large language models: AI coding agents working from the [`AGENTS.md`](AGENTS.md) brief in this repo.
+
+
 See what is installed, what is working, what ran, and what will start when you log in. RunningMan discovers existing installations in place and keeps their configuration and workspaces where they are.
 
 ![RunningMan dashboard with fictional preview runners](docs/images/overview.png)
@@ -17,6 +21,7 @@ The preview above uses fictional runners and jobs.
 - **Finish the job first.** Stop a busy runner after its current job finishes; cancel that request any time. RunningMan must remain open until it stops the runner.
 - **Create and remove.** Register a repository or organization runner from its GitHub URL, download and verify the official runner, and install its user service. Unregister existing runners without deleting their workspaces.
 - **Job history.** Search and filter locally recorded jobs, see outcomes and durations, and jump to their GitHub run when its URL is available.
+- **Job log.** Follow a GitHub runner's current job step by step, like the log on GitHub, read from the runner's local files with secrets redacted.
 - **Live diagnostics.** Search and follow redacted logs, reveal installations in Finder, and export a diagnostic report.
 - **Menu-bar access.** Check the fleet and manage runners even after closing the main window.
 - **Keep builds awake.** Optionally prevent idle sleep while a job is running. Closing the lid can still put a laptop to sleep.
@@ -27,7 +32,7 @@ RunningMan is an independent personal project. It uses SwiftUI and AppKit, with 
 
 Requires macOS 14 or later.
 
-<!-- latest-release -->[RunningMan-v0.2.0.zip](https://github.com/L-K-M/RunningMan/releases/download/v0.2.0/RunningMan-v0.2.0.zip)<!-- /latest-release --> (or an older one from the [releases](https://github.com/L-K-M/RunningMan/releases) list), unzip, and copy **RunningMan.app** to Applications. The build is ad-hoc signed, not notarized: open it once, click Done, then System Settings → Privacy & Security → Open Anyway (Control-click → Open on macOS 14).
+<!-- latest-release -->[RunningMan-v1.2.0.zip](https://github.com/L-K-M/RunningMan/releases/download/v1.2.0/RunningMan-v1.2.0.zip)<!-- /latest-release --> (or an older one from the [releases](https://github.com/L-K-M/RunningMan/releases) list), unzip, and copy **RunningMan.app** to Applications. The build is ad-hoc signed, not notarized: open it once, click Done, then System Settings → Privacy & Security → Open Anyway (Control-click → Open on macOS 14).
 
 Once installed, RunningMan checks a small public manifest file once a day and shows a banner when a newer release exists. Turn it off in Settings → Updates.
 
@@ -54,7 +59,9 @@ open dist/RunningMan.app
 
 ## Existing runners
 
-Open RunningMan. It checks runner installation folders immediately below your home directory, its own managed runner directory, your user LaunchAgents, and Forgejo system LaunchDaemons that run as your account. Use **Import existing runner…** for installations elsewhere.
+Open RunningMan. It checks runner installation folders immediately below your home directory, `~/actions-runners` and `~/GitHubRunners`, its own managed runner directory, folders referenced by your user LaunchAgents, Forgejo system LaunchDaemons that run as your account, and folders you imported. Entries in `~/actions-runners`, `~/GitHubRunners` and the managed runner directory can be symbolic links to another volume. Use **Import existing runner…** for installations elsewhere.
+
+RunningMan does not look inside the standard folders in your home directory (Applications, Desktop, Documents, Downloads, Library, Movies, Music, Pictures and Public), so macOS does not ask you for access to them. Import a runner stored in Documents, Desktop or Downloads with **Import existing runner…**, unless a user LaunchAgent already refers to it. Each folder listing is limited to 512 entries; RunningMan warns you when a folder has more.
 
 Discovery reads non-secret runner metadata and local diagnostics. It never executes a discovered runner or reads its credential files. Opening the app does not start, stop or reconfigure runners.
 
@@ -93,7 +100,7 @@ runs-on: [self-hosted, macOS]
 
 ## Forgejo runners
 
-Choose **New Runner → Forgejo**, enter your HTTPS server URL, and connect with a Forgejo access token. The token is saved in your login Keychain. Repository, organization, personal-account and instance registration scopes are supported; the token needs runner-management permission for the selected scope. Forgejo 15 or later and Forgejo Runner 13.2 or later are required for this setup flow.
+Choose **New Runner → Forgejo**, enter your HTTPS server URL, and connect with a Forgejo access token. RunningMan checks the token with your server first and saves it in your login Keychain only if the server accepts it. Repository, organization, personal-account and instance registration scopes are supported; the token needs runner-management permission for the selected scope. Forgejo 15 or later and Forgejo Runner 13.2 or later are required for this setup flow.
 
 RunningMan installs the checksummed Homebrew core `forgejo-runner` package when needed and copies its native binary into the new runner directory. It uses its own user LaunchAgent rather than starting a global Homebrew service. Install Homebrew first. JavaScript workflow actions also need a compatible Node.js installation on the Mac; the runner package does not bundle it.
 
@@ -113,7 +120,7 @@ Open **Workload** and enable server monitoring. It is off by default. GitHub use
 
 Queue counts include jobs whose labels match known local runners. A job belongs to a compatible pool, so several machines may be able to claim it. Counts are deduplicated when the same job is visible through several scopes; they are not added once per compatible runner. The busiest visible queues appear first.
 
-Repository and organization scans are bounded and disclose partial access or inspection limits. Forgejo account and instance scopes use its active-runner queue API; that API omits jobs blocked on dependencies or approvals. Unknown or unsupported data shows **Unavailable** or **—**, rather than an empty queue. Some Forgejo versions omit per-job runner assignment and timestamps: exact occupied slots and queue age cannot be reconstructed from those responses. GitHub queue age is shown only when the job itself reports a creation timestamp.
+Repository and organization scans are bounded and disclose partial access or inspection limits. Organization scans cover up to eight of the most recently active repositories, fewer on GitHub when the per-refresh request budget cannot cover eight. Reading GitHub runner labels needs repository administration, or for organizations the `admin:org` scope (`gh auth refresh -h github.com -s admin:org`); without it, RunningMan infers labels from your runner's settings and lists matching jobs without a count. Forgejo account and instance scopes use its active-runner queue API; that API omits jobs blocked on dependencies or approvals. Unknown or unsupported data shows **Unavailable** or **—**, rather than an empty queue. Some Forgejo versions omit per-job runner assignment and timestamps: exact occupied slots and queue age cannot be reconstructed from those responses. GitHub queue age is shown only when the job itself reports a creation timestamp.
 
 **Busy while observed** is an estimate from consecutive known idle/busy samples while RunningMan is monitoring. It shows the covered time explicitly; app downtime, uncertain activity and gaps over 15 seconds are excluded. It measures whether at least one job was active, not CPU load or the percentage of occupied slots on a multi-job runner. Up to 48 hours of bounded observations are stored privately; the view covers the last 24 hours. Recorded-job counts and median durations come separately from available local job history, which can be incomplete for Forgejo.
 
@@ -127,6 +134,8 @@ History is recovered from available local Runner and Worker diagnostics, then sa
 
 Unfinished jobs without evidence of a current worker show **Unknown**, with no invented completion time. Records with confirmed outcomes keep them when older logs are scanned again. Up to 2,000 jobs and 500 activity events are retained, with bounded log tails and incremental background reads.
 
+The **Job log** tab shows the steps and output of a GitHub runner's most recent job while RunningMan is open. The runner uploads and deletes its output files during the job, so output from before RunningMan started, or from a gap between reads, is not shown; open the run on GitHub for the complete log. Output is kept in memory only, until the runner's next job. Forgejo runners send step output straight to the server, so the tab is not available for them.
+
 Registration credentials are never read. Common credential formats and explicit operation tokens are redacted from displayed or exported logs. Diagnostic exports include runner names, repository names and local paths.
 
 ## Development
@@ -139,7 +148,7 @@ scripts/smoke-test.sh
 
 `scripts/build.sh` also accepts `--universal`, `--zip`, `--run`, `--install` (replaces `/Applications/RunningMan.app`) and `--clean`. To cut a release, run `scripts/release.sh 1.2.0` on a clean, pushed `main` (`--dry-run` checks first): it updates the marked download link above, commits, tags `v1.2.0` and pushes both, after which the release workflow builds and publishes the zip and announces it to installed apps.
 
-The smoke test opens a clearly labelled synthetic preview workspace and saves eight screenshots under **.local/screenshots/**, including light/dark workload and cleanup views. It never controls installed runners. You can explore that preview manually:
+The smoke test opens a clearly labelled synthetic preview workspace and saves eight screenshots under **.local/screenshots/**, including light/dark workload and cleanup views, and fails if a section comes out blank. It captures only RunningMan's own window, so it needs macOS 14.4 or later but no Screen Recording permission. It never controls installed runners or changes your saved window layout. You can explore that preview manually:
 
 ~~~sh
 open -na dist/RunningMan.app --args --demo

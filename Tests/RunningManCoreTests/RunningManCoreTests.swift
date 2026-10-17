@@ -18,10 +18,23 @@ final class RunningManCoreTests: XCTestCase {
         return InstalledRunner(name: "build-example", directory: url, githubURL: URL(string: "https://github.com/example/desktop"))
     }
 
+    func testStatusFiltersSeparateBusyFromOnlineRunners() {
+        XCTAssertEqual(RunnerStatusFilter.allCases.map(\.title), ["All", "Busy", "Online", "Stopped", "Attention"])
+
+        let matches = { (filter: RunnerStatusFilter) in RunnerStatus.allCases.filter(filter.matches) }
+        XCTAssertEqual(matches(.all), RunnerStatus.allCases)
+        XCTAssertEqual(matches(.busy), [.busy])
+        XCTAssertEqual(matches(.online), [.idle, .busy])
+        XCTAssertEqual(matches(.stopped), [.stopped, .disabled])
+        XCTAssertEqual(matches(.attention), [.attention, .unknown])
+    }
+
     func testDiscoveryBOMAndAbsoluteServicePathAndImportDeduplicate() async throws {
         let installation = temporary.appendingPathComponent("actions-runner-example")
         let plist = temporary.appendingPathComponent("Library/LaunchAgents/actions.runner.example.desktop.plist")
-        try write("\u{feff}{\"agentName\":\"example-mac\",\"agentId\":42,\"gitHubUrl\":\"https://github.com/example/desktop\",\"labels\":[\"ARM64\",{\"name\":\"local-release\"}]}", to: installation.appendingPathComponent(".runner"))
+        // Like a real GitHub .runner, this one has no labels; RunningMan's sidecar does.
+        try write("\u{feff}{\"agentName\":\"example-mac\",\"agentId\":42,\"gitHubUrl\":\"https://github.com/example/desktop\",\"workFolder\":\"_work\"}", to: installation.appendingPathComponent(".runner"))
+        try write("{\"labels\":[\"local-release\",\"xcode-26\"]}", to: installation.appendingPathComponent(".runningman-labels.json"))
         let properties: [String: Any] = ["Label": "actions.runner.example.desktop", "WorkingDirectory": installation.path,
             "ProgramArguments": [installation.appendingPathComponent("runsvc.sh").path]]
         try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -36,9 +49,34 @@ final class RunningManCoreTests: XCTestCase {
         XCTAssertEqual(result.runners.count, 1)
         XCTAssertEqual(result.runners.first?.serviceLabel, "actions.runner.example.desktop")
         XCTAssertEqual(result.runners.first?.id, installation.path)
-        XCTAssertEqual(result.runners.first?.labels, ["ARM64", "local-release"])
+        XCTAssertEqual(result.runners.first?.labels, ["local-release", "xcode-26"])
         XCTAssertEqual(result.runners.first?.version, "2.400.1")
         XCTAssertTrue(result.warnings.isEmpty)
+    }
+
+    func testRunnerFileLabelsWinAndBadSidecarsAreIgnored() async throws {
+        func installation(_ name: String, metadata: String? = nil, sidecar: String? = nil) throws -> URL {
+            let directory = temporary.appendingPathComponent(name)
+            try write(metadata ?? "{\"agentName\":\"\(name)\"}", to: directory.appendingPathComponent(".runner"))
+            try write("", to: directory.appendingPathComponent("bin/Runner.Listener"))
+            if let sidecar { try write(sidecar, to: directory.appendingPathComponent(".runningman-labels.json")) }
+            return directory
+        }
+        _ = try installation("a-runner-file", metadata: "{\"agentName\":\"a-runner-file\",\"labels\":[\"ARM64\",{\"name\":\"local-release\"}]}",
+                             sidecar: "{\"labels\":[\"ignored\"]}")
+        let linked = try installation("b-linked")
+        let elsewhere = temporary.appendingPathComponent("elsewhere-labels.json")
+        try write("{\"labels\":[\"linked\"]}", to: elsewhere)
+        try FileManager.default.createSymbolicLink(at: linked.appendingPathComponent(".runningman-labels.json"), withDestinationURL: elsewhere)
+        _ = try installation("c-invalid", sidecar: "{\"labels\":[\"has,comma\"]}")
+        // 100 labels of 256 characters are each valid, but together exceed 16 KiB.
+        let longLabels = (0..<100).map { "\"" + String(format: "%03d", $0) + String(repeating: "a", count: 253) + "\"" }
+        _ = try installation("d-oversized", sidecar: "{\"labels\":[" + longLabels.joined(separator: ",") + "]}")
+        _ = try installation("e-redacted", sidecar: "{\"labels\":[\"token=fictional-value\",\"macOS\"]}")
+        let result = await RunnerDiscovery(homeDirectory: temporary).discover()
+        XCTAssertEqual(result.runners.map(\.name), ["a-runner-file", "b-linked", "c-invalid", "d-oversized", "e-redacted"])
+        XCTAssertEqual(result.runners.map(\.labels), [["ARM64", "local-release"], [], [], [], ["token=[REDACTED]", "macOS"]])
+        XCTAssertTrue(result.warnings.isEmpty, "A bad sidecar never hides the runner")
     }
 
     func testDiscoveryFindsExternalServiceButDoesNotRecursivelyScanHome() async throws {
@@ -65,6 +103,86 @@ final class RunningManCoreTests: XCTestCase {
         let result = await RunnerDiscovery(homeDirectory: temporary).discover()
         XCTAssertEqual(result.runners.map(\.name), ["valid"])
         XCTAssertEqual(result.warnings.count, 1)
+    }
+
+    private func writeGitHubRunner(_ name: String, at directory: URL) throws {
+        try write("{\"agentName\":\"\(name)\",\"gitHubUrl\":\"https://github.com/example/desktop\"}", to: directory.appendingPathComponent(".runner"))
+        try write("", to: directory.appendingPathComponent("bin/Runner.Listener"))
+    }
+
+    func testDiscoveryNeverProbesStandardHomeFoldersUnlessImportedOrReferenced() async throws {
+        // A runner placed directly in a standard folder is found only if discovery looks inside it.
+        for folder in ["Applications", "Desktop", "Documents", "Downloads", "Library", "Movies", "Music", "Pictures", "Public"] {
+            try writeGitHubRunner("in-\(folder.lowercased())", at: temporary.appendingPathComponent(folder))
+        }
+        try writeGitHubRunner("home-child", at: temporary.appendingPathComponent("actions-runner"))
+        try writeGitHubRunner("github-runners-child", at: temporary.appendingPathComponent("GitHubRunners/mac2"))
+        let documentsRunner = temporary.appendingPathComponent("Documents/actions-runner")
+        try writeGitHubRunner("documents-runner", at: documentsRunner)
+        let serviceRunner = temporary.appendingPathComponent("Downloads/service-runner")
+        try writeGitHubRunner("service-runner", at: serviceRunner)
+        let plist = temporary.appendingPathComponent("Library/LaunchAgents/actions.runner.example.service.plist")
+        let properties: [String: Any] = ["Label": "actions.runner.example.service", "WorkingDirectory": serviceRunner.path,
+            "ProgramArguments": [serviceRunner.appendingPathComponent("runsvc.sh").path]]
+        try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: properties, format: .xml, options: 0).write(to: plist)
+        let scanned = await RunnerDiscovery(homeDirectory: temporary).discover()
+        XCTAssertEqual(scanned.runners.map(\.name), ["github-runners-child", "home-child", "service-runner"])
+        XCTAssertTrue(scanned.warnings.isEmpty)
+        let imported = await RunnerDiscovery(homeDirectory: temporary).discover(additionalDirectories: [documentsRunner])
+        XCTAssertEqual(imported.runners.map(\.name), ["documents-runner", "github-runners-child", "home-child", "service-runner"])
+        XCTAssertEqual(imported.runners.first?.directory.path, documentsRunner.resolvingSymlinksInPath().path)
+    }
+
+    func testDiscoveryFollowsRunnerFolderLinksOnceButNotHomeLinks() async throws {
+        let home = temporary.appendingPathComponent("home")
+        let external = temporary.appendingPathComponent("Volumes/Fast/mac1")
+        try writeGitHubRunner("linked-runner", at: external)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("actions-runners"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("GitHubRunners"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("actions-runners/mac1"), withDestinationURL: external)
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("GitHubRunners/mac1-alias"), withDestinationURL: external)
+        // Links to files and dangling links are not runner folders.
+        try write("", to: temporary.appendingPathComponent("Volumes/Fast/notes.txt"))
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("actions-runners/notes"),
+            withDestinationURL: temporary.appendingPathComponent("Volumes/Fast/notes.txt"))
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("actions-runners/missing"),
+            withDestinationURL: temporary.appendingPathComponent("Volumes/Fast/missing"))
+        // Links directly in the home folder, including a linked standard folder, are never followed.
+        let elsewhere = temporary.appendingPathComponent("Volumes/Fast/desktop-runner")
+        try writeGitHubRunner("home-link", at: elsewhere)
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("Desktop"), withDestinationURL: elsewhere)
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("runner-shortcut"), withDestinationURL: elsewhere)
+        let result = await RunnerDiscovery(homeDirectory: home).discover()
+        XCTAssertEqual(result.runners.map(\.name), ["linked-runner"])
+        XCTAssertEqual(result.runners.first?.directory.path, external.resolvingSymlinksInPath().path)
+        XCTAssertTrue(result.warnings.isEmpty)
+    }
+
+    func testDiscoveryWarnsWhenAFolderExceedsTheListingLimit() async throws {
+        let roots = temporary.appendingPathComponent("actions-runners")
+        let agents = temporary.appendingPathComponent("Library/LaunchAgents")
+        try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
+        for index in 0..<513 {
+            try FileManager.default.createDirectory(at: roots.appendingPathComponent(String(format: "runner-%03d", index)), withIntermediateDirectories: true)
+            try write("", to: agents.appendingPathComponent(String(format: "org.example.agent-%03d.plist", index)))
+        }
+        let result = await RunnerDiscovery(homeDirectory: temporary).discover()
+        XCTAssertEqual(result.warnings.filter { $0.contains("first 512 entries") }.count, 2)
+        XCTAssertTrue(result.warnings.contains { $0.contains("~/actions-runners") })
+        XCTAssertTrue(result.warnings.contains { $0.contains("~/Library/LaunchAgents") && $0.contains("Services listed after those were not checked.") })
+        XCTAssertFalse(result.warnings.contains { $0.contains(temporary.path) })
+        try FileManager.default.removeItem(at: roots.appendingPathComponent("runner-000"))
+        try FileManager.default.removeItem(at: agents.appendingPathComponent("org.example.agent-000.plist"))
+        let atLimit = await RunnerDiscovery(homeDirectory: temporary).discover()
+        XCTAssertTrue(atLimit.warnings.isEmpty)
+        // Standard folders do not count; 513 other home children do.
+        for index in 0..<513 {
+            try FileManager.default.createDirectory(at: temporary.appendingPathComponent(String(format: "project-%03d", index)), withIntermediateDirectories: true)
+        }
+        let crowdedHome = await RunnerDiscovery(homeDirectory: temporary).discover()
+        XCTAssertTrue(crowdedHome.warnings.contains { $0.contains("your home folder") && $0.contains("Import existing runner") })
+        XCTAssertFalse(crowdedHome.warnings.contains { $0.contains(temporary.path) })
     }
 
     func testListenerJobsIncrementalCompletionAndNoDuplicateEvents() async throws {

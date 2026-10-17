@@ -14,15 +14,25 @@ Read README.md and docs/architecture.md. This is an independent native macOS app
 - Demo mode must not modify live runners, preferences or imported-directory settings. Keep demo data fictional; no company names, credentials, user paths or actual job logs in tracked files.
 - Run swift test, the applicable build and preview smoke test. Inspect rendered light/dark screenshots after UI changes.
 - Preserve the existing LICENSE and ignored IDE files.
+- Reverse-DNS identifiers live under `ch.lkmc.*`: the bundle id is
+  `ch.lkmc.RunningMan`. New managed Forgejo services get launchd labels under
+  `ch.lkmc.RunningMan.forgejo.*`; services installed under the legacy
+  `io.github.l-k-m.RunningMan.forgejo.*` prefix remain managed
+  (`ManagedServiceLabel` in RunnerServiceController.swift owns the list).
 
 ## Releases
 
 Release tags are annotated `vX.Y.Z` tags on `main`, cut with
 `scripts/release.sh`. There is no version in the sources to bump: the tag is
 the marketing version (`RUNNINGMAN_VERSION` at build time); the bundle build
-number is the commit count. The release workflow verifies the tag shape and
+number is the commit count unless `RUNNINGMAN_BUILD_NUMBER` overrides it (a
+checkout without git history builds with 0; the release workflow requires the
+full history). The release workflow verifies the tag shape and
 `CFBundleShortVersionString`, requires an annotated tag on `main`, reruns the
-tests, and refuses to announce drafts, prereleases or non-version tags.
+tests, and refuses to announce drafts, prereleases, non-version tags or
+builds whose preview smoke test did not pass (the assets are still
+attached and the run fails visibly; a manual run can waive this with
+`announce_without_preview`, which is recorded in the run summary).
 Builds are ad-hoc signed — never describe them as notarized or Developer ID
 signed.
 

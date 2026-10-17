@@ -112,32 +112,35 @@ struct WorkloadView: View {
 struct RunnerWorkloadRow: View {
     @Environment(AppModel.self) private var model
     let snapshot: RunnerSnapshot
-    /// The runner detail already names the runner and can be narrow, so it hides the
-    /// name and lets the figures share the row instead of using fixed columns.
+    /// The runner detail already names the runner, so it hides the name and
+    /// lets the figures share the row.
     var showsName = true
+    // Cached in AppModel; these are lookups, not calculations.
+    private var observed: ObservedRunnerUsage? { model.observedUsage[snapshot.id] }
+    private var history: RunnerUsageMetrics { model.usage(for: snapshot.runner) }
+    private var queue: Int? { model.compatibleQueueCount(for: snapshot.id) }
 
     var body: some View {
-        // Cached in AppModel; these are lookups, not calculations.
-        let observed = model.observedUsage[snapshot.id]
-        let history = model.usage(for: snapshot.runner)
-        let queue = model.compatibleQueueCount(for: snapshot.id)
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 16) {
-                if showsName {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Button(snapshot.runner.name) {
-                            model.selectedRunnerID = snapshot.id
-                            model.section = .runners
-                        }.buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
-                        Text("\(snapshot.runner.provider.title) · \(snapshot.runner.capacity) \(snapshot.runner.capacity == 1 ? "slot" : "slots")")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }.frame(minWidth: 140, alignment: .leading)
-                    Spacer(minLength: 8)
+            if showsName {
+                // The fixed stat columns need about 560 pt. A narrow window
+                // stacks the stats under the name instead of letting the row
+                // overflow and clip.
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 16) {
+                        identity.frame(minWidth: 140, alignment: .leading)
+                        Spacer(minLength: 8)
+                        busyStat(.trailing).frame(width: 125, alignment: .trailing)
+                        jobsStat(.trailing).frame(width: 110, alignment: .trailing)
+                        queueStat(.trailing).frame(width: 110, alignment: .trailing)
+                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        identity
+                        sharedStats
+                    }
                 }
-                figure(observed?.busyFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—", caption: "Busy while observed", size: 21, column: 125)
-                figure("\(history.completedJobs)", caption: "Recorded jobs · 24h", size: 18, column: 110)
-                figure(queue.map(String.init) ?? "—", caption: "Compatible queue", size: 18, column: 110,
-                       color: (queue ?? 0) > 0 ? StatusTone.warning.text : .primary)
+            } else {
+                sharedStats
             }
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
@@ -153,16 +156,45 @@ struct RunnerWorkloadRow: View {
         }.padding(18)
     }
 
-    /// Beside the name, a figure sits in a fixed trailing column that lines up across
-    /// rows; without it, figures are leading-aligned and share the width.
-    private func figure(_ value: String, caption: String, size: CGFloat, column: CGFloat, color: Color = .primary) -> some View {
-        VStack(alignment: showsName ? .trailing : .leading, spacing: 5) {
+    private var identity: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Button(snapshot.runner.name) {
+                model.selectedRunnerID = snapshot.id
+                model.section = .runners
+            }.buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
+            Text("\(snapshot.runner.provider.title) · \(snapshot.runner.capacity) \(snapshot.runner.capacity == 1 ? "slot" : "slots")")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+
+    private var sharedStats: some View {
+        HStack(alignment: .top, spacing: 12) {
+            busyStat(.leading).frame(maxWidth: .infinity, alignment: .leading)
+            jobsStat(.leading).frame(maxWidth: .infinity, alignment: .leading)
+            queueStat(.leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func busyStat(_ alignment: HorizontalAlignment) -> some View {
+        stat(observed?.busyFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—", caption: "Busy while observed", size: 21, alignment: alignment)
+    }
+
+    private func jobsStat(_ alignment: HorizontalAlignment) -> some View {
+        stat("\(history.completedJobs)", caption: "Recorded jobs · 24h", size: 18, alignment: alignment)
+    }
+
+    private func queueStat(_ alignment: HorizontalAlignment) -> some View {
+        stat(queue.map(String.init) ?? "—", caption: "Compatible queue", size: 18, alignment: alignment,
+             color: (queue ?? 0) > 0 ? StatusTone.warning.text : .primary)
+    }
+
+    /// Stats align trailing in the wide row and leading when they share the width.
+    private func stat(_ value: String, caption: String, size: CGFloat, alignment: HorizontalAlignment, color: Color = .primary) -> some View {
+        VStack(alignment: alignment, spacing: 5) {
             Text(value).font(.system(size: size, weight: .semibold, design: .rounded)).monospacedDigit()
                 .foregroundStyle(color).numericValueTransition(value)
             Text(caption).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
         }
-        .frame(width: showsName ? column : nil, alignment: .trailing)
-        .frame(maxWidth: showsName ? nil : .infinity, alignment: .leading)
     }
 
     /// AppModel republishes sampled usage only when a whole minute or the rounded
