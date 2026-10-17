@@ -113,4 +113,62 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(values.count, 1)
         XCTAssertEqual(ActivityIdentity(values[0]), ActivityIdentity(repeated))
     }
+
+    func testDiagnosticsReportCatchesTokensInPathsAndLogKeys() throws {
+        // Assembled at runtime so the fixture never looks like a committed credential.
+        let token = "gh" + "p_" + String(repeating: "A1", count: 18)
+        let runner = InstalledRunner(name: "mac", directory: URL(fileURLWithPath: "/synthetic/setup-\(token)/runner"))
+        let data = try AppModel.diagnosticsReportData(generatedAt: Date(timeIntervalSince1970: 1_000),
+            runners: [RunnerSnapshot(runner: runner, status: .idle)], jobs: [], events: [], cleanup: [],
+            logs: [runner.id: "listening"], warnings: [])
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(token))
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual((report["logs"] as? [String: String])?.values.first, "listening")
+    }
+
+    /// Without a dispatch line, RunnerLogMonitor builds the job id from the raw job name.
+    func testDiagnosticsReportRedactsFallbackJobIdentifiers() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let runner = InstalledRunner(name: "mac", directory: URL(fileURLWithPath: "/synthetic/runner"))
+        let job = RunnerJob(id: "\(runner.id)::1000.0::Deploy password=abc", runnerID: runner.id, name: "Deploy password=abc", startedAt: start)
+        let data = try AppModel.diagnosticsReportData(generatedAt: start, runners: [RunnerSnapshot(runner: runner, status: .idle)],
+            jobs: [job], events: [], cleanup: [], logs: [:], warnings: [])
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("abc"))
+    }
+
+    func testDiagnosticsReportRedactsEachFieldOnceAndStaysValidJSON() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let runner = InstalledRunner(name: "build token=abc", directory: URL(fileURLWithPath: "/synthetic/runner"),
+            githubURL: URL(string: "https://deploy:abc@forge.example/example/desktop"), labels: ["self-hosted", "password=abc"])
+        let job = RunnerJob(id: "job", runnerID: runner.id, name: "Deploy token=abc", repository: "example/desktop secret=abc",
+            workflow: "Release api_key=abc", runURL: URL(string: "https://deploy:abc@forge.example/example/desktop/actions/runs/1"),
+            startedAt: start, finishedAt: start.addingTimeInterval(60), outcome: .success)
+        let event = ActivityEvent(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, date: start, runnerID: runner.id,
+            title: "Started token=abc", detail: "clone https://deploy:abc@forge.example/example/desktop.git")
+        let cleanup = RunnerCleanupRecord(id: "cleanup", runnerID: runner.id, repository: "example/desktop", runID: "1",
+            runAttempt: "1", job: "Deploy token=abc", startedAt: start, finishedAt: start.addingTimeInterval(5),
+            status: .success, message: "Removed token=abc")
+        // A quote after a redacted value and a truncated quoted assignment both broke the old
+        // whole-file pass, which consumed the escaping backslash of the encoded quote.
+        let log = "[2026-10-16 10:00:00Z INFO Worker] token=abc\" done\nclone https://deploy:abc@forge.example/example/desktop.git\nexport RUNNER_TOKEN=\""
+        // Links without credentials must survive the export unchanged.
+        let safeRunner = InstalledRunner(name: "mac", directory: URL(fileURLWithPath: "/synthetic/safe"),
+            githubURL: URL(string: "https://github.com/example/desktop"))
+        let safeJob = RunnerJob(id: "safe", runnerID: safeRunner.id, name: "Build",
+            runURL: URL(string: "https://github.com/example/desktop/actions/runs/2"), startedAt: start)
+        let data = try AppModel.diagnosticsReportData(generatedAt: start,
+            runners: [RunnerSnapshot(runner: runner, status: .idle), RunnerSnapshot(runner: safeRunner, status: .idle)],
+            jobs: [job, safeJob], events: [event], cleanup: [cleanup], logs: [runner.id: log], warnings: ["Could not read token=abc"])
+
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(text.contains("abc"), text)
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let logs = try XCTUnwrap(report["logs"] as? [String: String])
+        XCTAssertEqual(logs[runner.id], "[2026-10-16 10:00:00Z INFO Worker] token=[REDACTED]\" done\nclone https://[REDACTED]@forge.example/example/desktop.git\nexport RUNNER_TOKEN=\"")
+        XCTAssertEqual(report["warnings"] as? [String], ["Could not read token=[REDACTED]"])
+        XCTAssertTrue(text.contains("https:\\/\\/github.com\\/example\\/desktop\\/actions\\/runs\\/2"), text)
+        let runners = try XCTUnwrap(report["runners"] as? [[String: Any]])
+        let urls = runners.compactMap { ($0["runner"] as? [String: Any])?["githubURL"] as? String }
+        XCTAssertEqual(urls, ["https://github.com/example/desktop"])
+    }
 }
