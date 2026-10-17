@@ -148,6 +148,43 @@ final class AppModelTests: XCTestCase {
                                                    inProgress: []), [])
     }
 
+    @MainActor func testForgejoStopAfterJobCanBeCancelledAfterMonitoringTurnsOff() {
+        let model = AppModel(demoMode: true)
+        let forgejo = model.runners.first { $0.runner.provider == .forgejo && $0.status == .busy }!
+        model.perform(.drain, on: forgejo)
+        XCTAssertTrue(model.drainingRunnerIDs.contains(forgejo.id))
+        model.remoteMonitoringEnabled = false
+        XCTAssertFalse(model.drainingRunnerIDs.contains(forgejo.id))
+        XCTAssertTrue(model.events.contains {
+            $0.title == "Stop after job cancelled: Forgejo activity can no longer be verified" && $0.runnerID == forgejo.id
+        })
+        // A request restored from an earlier launch can still be cancelled while monitoring is off.
+        model.drainingRunnerIDs.insert(forgejo.id)
+        model.perform(.drain, on: forgejo)
+        XCTAssertFalse(model.drainingRunnerIDs.contains(forgejo.id))
+        XCTAssertNil(model.errorMessage)
+        // A new request is refused because nothing could confirm the job finished.
+        model.perform(.drain, on: forgejo)
+        XCTAssertFalse(model.drainingRunnerIDs.contains(forgejo.id))
+        XCTAssertNotNil(model.errorMessage)
+        // A restored request is ended by the next refresh instead of waiting forever.
+        model.drainingRunnerIDs.insert(forgejo.id)
+        model.processDrainRequests()
+        XCTAssertFalse(model.drainingRunnerIDs.contains(forgejo.id))
+    }
+
+    @MainActor func testForgejoStopAfterJobRequiresVerifiableActivity() {
+        let model = AppModel(demoMode: true)
+        let index = model.runners.firstIndex { $0.runner.provider == .forgejo && $0.status == .idle }!
+        model.runners[index].status = .unknown
+        let runner = model.runners[index]
+        model.perform(.drain, on: runner)
+        XCTAssertFalse(model.drainingRunnerIDs.contains(runner.id))
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertNil(model.confirmation)
+        XCTAssertEqual(model.runners[index].status, .unknown)
+    }
+
     @MainActor func testConfirmedStopDoesNotRunWhileAnotherActionOwnsTheRunner() {
         let model = AppModel(demoMode: true)
         let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!

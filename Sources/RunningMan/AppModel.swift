@@ -77,6 +77,7 @@ final class AppModel {
             if !remoteMonitoringEnabled {
                 workloadTask?.cancel()
                 workload = nil
+                cancelForgejoDrainRequests()
             }
         }
     }
@@ -284,10 +285,13 @@ final class AppModel {
     /// Runs after each refresh: ends requests that no longer apply, then stops drained runners that have
     /// gone idle, waiting out the backoff after a failed attempt.
     func processDrainRequests(now: Date = Date()) {
-        for id in Self.endedDrainRequests(drainingRunnerIDs, runners: runners, inProgress: busyRunnerIDs).sorted() {
-            drainingRunnerIDs.remove(id)
+        let ended = Self.endedDrainRequests(drainingRunnerIDs, runners: runners, inProgress: busyRunnerIDs)
+        if !ended.isEmpty { drainingRunnerIDs.subtract(ended) }
+        for id in ended.sorted() {
             record(title: "Stop after job ended: \(runnerDisplayName(id)) is no longer running", runnerID: id)
         }
+        // Requests restored from an earlier launch can predate turning server monitoring off.
+        if !remoteMonitoringEnabled { cancelForgejoDrainRequests() }
         for runner in runners where drainingRunnerIDs.contains(runner.id) && runner.status == .idle && !busyRunnerIDs.contains(runner.id) {
             if let failure = drainFailures[runner.id], failure.retryDate > now { continue }
             runAction(.stop, on: runner, origin: .automatic)
@@ -369,20 +373,21 @@ final class AppModel {
 
     func perform(_ action: RunnerAction, on runner: RunnerSnapshot) {
         guard !busyRunnerIDs.contains(runner.id) else { return }
+        // Cancelling is always allowed, even when a new request would be refused.
+        if action == .drain, drainingRunnerIDs.contains(runner.id) {
+            drainingRunnerIDs.remove(runner.id)
+            record(title: "Stop after job cancelled", runnerID: runner.id, detail: runner.runner.name)
+            return
+        }
         guard requireUserService(runner) else { return }
         if action == .drain {
-            if runner.runner.provider == .forgejo && !remoteMonitoringEnabled && !demoMode {
-                errorMessage = "Enable server monitoring in Workload to verify when this Forgejo runner becomes idle. Stop now is available with an interruption confirmation."
+            if let refusal = drainRefusal(for: runner) {
+                errorMessage = refusal
                 return
             }
-            if drainingRunnerIDs.contains(runner.id) {
-                drainingRunnerIDs.remove(runner.id)
-                record(title: "Stop-after-job cancelled", runnerID: runner.id)
-            } else {
-                drainingRunnerIDs.insert(runner.id)
-                record(title: "Will stop after the current job", runnerID: runner.id)
-                if runner.status == .idle { runAction(.stop, on: runner) }
-            }
+            drainingRunnerIDs.insert(runner.id)
+            record(title: "Will stop after the current job", runnerID: runner.id, detail: runner.runner.name)
+            if runner.status == .idle { runAction(.stop, on: runner) }
             return
         }
         if action == .delete {
@@ -396,6 +401,29 @@ final class AppModel {
                 buttonTitle: action == .disable ? "Disable and interrupt" : "Stop and interrupt")
             pendingConfirmation = .runner(PendingRunnerAction(action: action, runnerID: runner.id, force: true))
         } else { runAction(action, on: runner) }
+    }
+
+    /// Why a new stop-after-job request cannot be honoured, or nil when it can. A Forgejo runner's
+    /// idle state comes from the server, so its request needs that state to be known.
+    private func drainRefusal(for runner: RunnerSnapshot) -> String? {
+        let name = runner.runner.name
+        if runner.status == .stopped || runner.status == .disabled { return "\(name) is not running." }
+        guard runner.runner.provider == .forgejo else { return nil }
+        guard remoteMonitoringEnabled else {
+            return "Turn on server monitoring in Workload so RunningMan can tell when \(name) finishes its job. You can still stop it now after confirming the interruption."
+        }
+        guard runner.status != .busy, runner.status != .idle else { return nil }
+        return "RunningMan cannot verify whether \(name) is running a job, so it cannot tell when to stop it. Check this server’s connection in Workload, or stop the runner now after confirming the interruption."
+    }
+
+    /// Without server monitoring a Forgejo request could never complete, so it ends with an explanation.
+    private func cancelForgejoDrainRequests() {
+        let ids = drainingRunnerIDs.intersection(runners.filter { $0.runner.provider == .forgejo }.map(\.id))
+        guard !ids.isEmpty else { return }
+        drainingRunnerIDs.subtract(ids)
+        for id in ids.sorted() {
+            record(title: "Stop after job cancelled: Forgejo activity can no longer be verified", runnerID: id, detail: runnerDisplayName(id))
+        }
     }
 
     func confirmPendingAction() {
