@@ -130,6 +130,8 @@ public actor RunnerLogMonitor {
                         budget -= header.count
                         consume(header, cursor: &cursor, runner: context, events: &events)
                         // Line state from the header does not describe the bytes after the jump.
+                        // workerID stays: a Worker_ log belongs to exactly one job, and its ID in
+                        // the header is what lets the result in the tail finish that job.
                         cursor.partial.removeAll(); cursor.message = nil
                         cursor.inJobContext = false; cursor.inPrivateKey = false
                         cursor.pendingID = nil; cursor.activeID = nil
