@@ -9,12 +9,17 @@ actor FakeExecutor: ProcessExecuting {
     var disabled = ""
     var failures: [String: ProcessResult] = [:]
     var installWhenRequested = false
-    func configure(processes: String = "", services: String = "", disabled: String = "", failures: [String: ProcessResult] = [:], installWhenRequested: Bool = false) {
+    var processesAfterKill: String?
+    var processesAfterDisable: String?
+    func configure(processes: String = "", services: String = "", disabled: String = "", failures: [String: ProcessResult] = [:], installWhenRequested: Bool = false, processesAfterKill: String? = nil, processesAfterDisable: String? = nil) {
         self.processes = processes; self.services = services; self.disabled = disabled; self.failures = failures; self.installWhenRequested = installWhenRequested
+        self.processesAfterKill = processesAfterKill; self.processesAfterDisable = processesAfterDisable
     }
     func recorded() -> [ProcessRequest] { requests }
     func run(_ request: ProcessRequest) async throws -> ProcessResult {
         requests.append(request)
+        if request.executable == "/bin/kill", let processesAfterKill { processes = processesAfterKill }
+        if request.arguments.first == "disable", let processesAfterDisable { processes = processesAfterDisable }
         let key = request.arguments.joined(separator: " ")
         if let result = failures[key] { return result }
         if installWhenRequested, request.arguments.last == "install", let root = request.directory {
@@ -89,6 +94,156 @@ final class RunnerServiceTests: XCTestCase {
         do { try await controller.setEnabled(false, for: runner); XCTFail("Expected refusal") } catch {}
         let commands = await fake.recorded()
         XCTAssertEqual(commands.count, 3)
+    }
+    func testDisableAppliesOverrideBeforeStoppingAndRechecksIdle() async throws {
+        let fake = FakeExecutor()
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.setEnabled(false, for: runner)
+        let commands = await fake.recorded()
+        let disable = try XCTUnwrap(commands.firstIndex { $0.arguments.first == "disable" })
+        let bootout = try XCTUnwrap(commands.firstIndex { $0.arguments.first == "bootout" })
+        XCTAssertLessThan(disable, bootout, "The disable override must be written even if stopping fails")
+        let checks = commands.indices.filter { commands[$0].arguments.first == "list" }
+        XCTAssertEqual(checks.count, 2, "Busy state is checked before disabling and again before stopping")
+        XCTAssertTrue(checks.contains { $0 > disable && $0 < bootout })
+        XCTAssertTrue(try readStartup())
+    }
+    func testDisableNeverStopsAJobThatStartedAfterTheFirstCheck() async throws {
+        let fake = FakeExecutor()
+        let busy = "100 1 \(runner.directory.path)/bin/Runner.Listener run\n101 100 \(runner.directory.path)/bin/Runner.Worker spawnclient 1 2\n"
+        await fake.configure(processesAfterDisable: busy)
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        do { try await controller.setEnabled(false, for: runner); XCTFail("Expected the busy runner to stay running") }
+        catch { XCTAssertTrue(error.localizedDescription.hasPrefix("Disabled, but stopping failed:"), error.localizedDescription) }
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.contains { $0.arguments.first == "disable" })
+        XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" || $0.executable == "/bin/kill" })
+    }
+    func testDisableReportsStopFailureAfterDisabling() async throws {
+        let fake = FakeExecutor()
+        await fake.configure(failures: ["bootout gui/\(getuid())/\(label)": ProcessResult(status: 5, output: "", error: "Input/output error")])
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        do { try await controller.setEnabled(false, for: runner); XCTFail("Expected partial failure") }
+        catch { XCTAssertTrue(error.localizedDescription.hasPrefix("Disabled, but stopping failed:"), error.localizedDescription) }
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.contains { $0.arguments == ["disable", "gui/\(getuid())/\(label)"] })
+    }
+    func testStopRefusesWhenServiceLoadStateCannotBeRead() async throws {
+        let listener = "777 1 \(runner.directory.path)/bin/Runner.Listener run --startuptype service\n"
+        for failure in [ProcessResult(status: 1, output: "", error: "Input/output error"), ProcessResult(status: 113, output: "", error: "", timedOut: true),
+                        ProcessResult(status: 0, output: "", error: "", truncated: true)] {
+            let fake = FakeExecutor()
+            await fake.configure(processes: listener, failures: ["print gui/\(getuid())/\(label)": failure])
+            let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+            do { try await controller.stop(runner); XCTFail("Expected unverifiable load state to refuse") }
+            catch { XCTAssertTrue(error.localizedDescription.contains("Cannot verify whether the runner service is loaded"), error.localizedDescription) }
+            let commands = await fake.recorded()
+            XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" || $0.executable == "/bin/kill" })
+        }
+    }
+    func testStopTreatsServiceNotFoundAsUnloaded() async throws {
+        let fake = FakeExecutor()
+        await fake.configure(failures: ["print gui/\(getuid())/\(label)": ProcessResult(status: 113, output: "", error: "Could not find service")])
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.stop(runner)
+        let commands = await fake.recorded()
+        XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" })
+    }
+    func testStopToleratesListenerThatExitsBeforeKill() async throws {
+        let fake = FakeExecutor()
+        await fake.configure(processes: "777 1 \(runner.directory.path)/bin/Runner.Listener run\n",
+                             failures: ["-TERM 777": ProcessResult(status: 1, output: "", error: "kill: 777: No such process")], processesAfterKill: "")
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.stop(runner)
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.contains { $0.executable == "/bin/kill" })
+    }
+    func testStopReportsListenerThatKeepsRunning() async throws {
+        let fake = FakeExecutor()
+        await fake.configure(processes: "777 1 \(runner.directory.path)/bin/Runner.Listener run\n")
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake, stopExitTimeout: 0.5)
+        do { try await controller.stop(runner); XCTFail("A listener that survives stopping must not be reported as stopped") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("still running"), error.localizedDescription) }
+    }
+    func testStaleServiceMarkerIsReplacedWhenStarting() async throws {
+        try FileManager.default.removeItem(at: plist)
+        let fake = FakeExecutor()
+        await fake.configure(installWhenRequested: true)
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        let snapshots = await controller.snapshots(for: [runner])
+        XCTAssertEqual(snapshots.first?.status, .stopped)
+        try await controller.start(runner)
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.contains { $0.arguments.last == "install" })
+        XCTAssertTrue(commands.contains { $0.arguments.first == "kickstart" })
+        XCTAssertEqual(try runnerText(runner.directory.appendingPathComponent(".service")), plist.path)
+        XCTAssertFalse(try readStartup(), "A reinstalled service must not opt into login startup")
+    }
+    func testStaleServiceMarkerDoesNotBlockStop() async throws {
+        try FileManager.default.removeItem(at: plist)
+        let fake = FakeExecutor()
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.stop(runner)
+        let commands = await fake.recorded()
+        XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" }, "launchd does not report the deleted plist, so nothing is unloaded")
+    }
+    func testStaleServiceMarkerRefusesWhenLoadStateCannotBeRead() async throws {
+        try FileManager.default.removeItem(at: plist)
+        let listener = "777 1 \(runner.directory.path)/bin/Runner.Listener run --startuptype service\n"
+        let fake = FakeExecutor()
+        await fake.configure(processes: listener, failures: ["print gui/\(getuid())/\(label)": ProcessResult(status: 5, output: "", error: "Input/output error")])
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        do { try await controller.stop(runner); XCTFail("Expected a refusal") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Cannot verify whether the runner service is loaded"), error.localizedDescription) }
+        let commands = await fake.recorded()
+        XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" || $0.executable == "/bin/kill" })
+    }
+    func testFailedSignalIsAnErrorOnlyWhileTheProcessRemains() async throws {
+        let listener = "777 1 \(runner.directory.path)/bin/Runner.Listener run --startuptype service\n"
+        let denied = ProcessResult(status: 1, output: "", error: "kill: 777: Operation not permitted")
+        let gone = FakeExecutor()
+        await gone.configure(processes: listener, failures: ["-TERM 777": denied], processesAfterKill: "")
+        try await RunnerServiceController(homeDirectory: home, executor: gone).stop(runner)
+        let stays = FakeExecutor()
+        await stays.configure(processes: listener, failures: ["-TERM 777": denied])
+        do { try await RunnerServiceController(homeDirectory: home, executor: stays).stop(runner); XCTFail("Expected the signal failure") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Stop manually started runner failed"), error.localizedDescription) }
+    }
+    func testStaleServiceMarkerStillUnloadsTheServiceLoadedFromIt() async throws {
+        try FileManager.default.removeItem(at: plist)
+        let target = "gui/\(getuid())/\(label)"
+        for (path, unloads) in [(plist.path, true), ("/Users/someone/Library/LaunchAgents/\(label).plist", false)] {
+            let fake = FakeExecutor()
+            await fake.configure(failures: ["print \(target)": ProcessResult(status: 0, output: "\(target) = {\n\tpath = \(path)\n\tstate = running\n}\n", error: "")])
+            let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+            try await controller.stop(runner)
+            let commands = await fake.recorded()
+            XCTAssertEqual(commands.contains { $0.arguments == ["bootout", target] }, unloads, path)
+        }
+    }
+    func testExistingServicePlistWithoutMarkerIsAdoptedInsteadOfReinstalled() async throws {
+        try FileManager.default.removeItem(at: runner.directory.appendingPathComponent(".service"))
+        let fake = FakeExecutor()
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.setEnabled(true, for: runner)
+        let commands = await fake.recorded()
+        XCTAssertFalse(commands.contains { $0.arguments.last == "install" || $0.arguments.first?.hasSuffix("/env.sh") == true })
+        XCTAssertEqual(commands.map(\.arguments), [["enable", "gui/\(getuid())/\(label)"]])
+        XCTAssertEqual(try runnerText(runner.directory.appendingPathComponent(".service")), plist.path)
+        XCTAssertTrue(try readStartup(), "Adopting an existing service preserves its startup policy")
+    }
+    func testForeignServicePlistWithoutMarkerIsNotAdopted() async throws {
+        try FileManager.default.removeItem(at: runner.directory.appendingPathComponent(".service"))
+        try writePlist(startup: true, root: home.appendingPathComponent("unrelated").path)
+        let before = try Data(contentsOf: plist)
+        let fake = FakeExecutor()
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        do { try await controller.setEnabled(true, for: runner); XCTFail("Expected mismatch refusal") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("does not match"), error.localizedDescription) }
+        XCTAssertEqual(before, try Data(contentsOf: plist))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: runner.directory.appendingPathComponent(".service").path))
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.isEmpty)
     }
     func testStopPreservesStartupAndEnablement() async throws {
         let fake = FakeExecutor()
@@ -169,7 +324,10 @@ final class RunnerServiceTests: XCTestCase {
         await fake.configure(failures: [remove: ProcessResult(status: 1, output: "", error: "Authentication TEMPORARY_REMOVAL_TOKEN failed")])
         let controller = RunnerServiceController(homeDirectory: home, executor: fake)
         do { try await controller.delete(runner, trashFiles: true); XCTFail("Expected unregister failure") }
-        catch { XCTAssertFalse(error.localizedDescription.contains("TEMPORARY_REMOVAL_TOKEN")) }
+        catch {
+            XCTAssertFalse(error.localizedDescription.contains("TEMPORARY_REMOVAL_TOKEN"))
+            XCTAssertTrue(error.localizedDescription.contains("The runner was stopped and remains stopped."), error.localizedDescription)
+        }
         XCTAssertTrue(FileManager.default.fileExists(atPath: runner.directory.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: plist.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: runner.directory.appendingPathComponent(".service").path))

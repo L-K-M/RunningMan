@@ -214,7 +214,10 @@ private final class ProcessExecution: @unchecked Sendable {
 }
 
 func checked(_ executor: any ProcessExecuting, _ request: ProcessRequest, operation: String) async throws -> ProcessResult {
-    let result = try await executor.run(request)
+    try requireSuccess(await executor.run(request), of: request, operation: operation)
+}
+
+func requireSuccess(_ result: ProcessResult, of request: ProcessRequest, operation: String) throws -> ProcessResult {
     guard result.status == 0 && !result.timedOut && !result.truncated else {
         var detail = String((result.error.isEmpty ? result.output : result.error).suffix(2500))
         for secret in request.secrets where !secret.isEmpty { detail = detail.replacingOccurrences(of: secret, with: "[REDACTED]") }

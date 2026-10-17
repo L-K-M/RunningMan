@@ -47,9 +47,11 @@ struct RunnerProcesses {
     func pid(for runner: InstalledRunner) -> Int32? {
         if runner.provider == .forgejo {
             guard let executable = runner.executableURL, let configuration = runner.configurationURL else { return nil }
+            // ps output cannot be split unambiguously, so exact forms keep paths
+            // containing spaces recognisable.
             let daemon = executable.path + " daemon "
             let expected = [daemon + "--config " + configuration.path, daemon + "-c " + configuration.path]
-            return entries.first { expected.contains($0.command) }?.pid
+            return entries.first { expected.contains($0.command) || Self.isDaemon($0.command, executable: executable, configuration: configuration) }?.pid
         }
         return entries.first { $0.command.hasPrefix(runner.directory.path + "/bin/Runner.Listener ") || $0.command == runner.directory.path + "/bin/Runner.Listener" }?.pid
     }
@@ -67,6 +69,18 @@ struct RunnerProcesses {
             (descendants.contains($0.pid) && ($0.command.contains("/Runner.Worker ") || $0.command.hasSuffix("/Runner.Worker")))
         }
     }
+    /// Accepts every flag order and form ForgejoDaemonCommand accepts. ps does not
+    /// show a process's working directory, so only an absolute configuration path
+    /// identifies the daemon: with a relative one, another daemon started elsewhere
+    /// with the same executable would pass as this runner's and be stopped. A
+    /// launchd-managed daemon is still found through its service PID.
+    private static func isDaemon(_ command: String, executable: URL, configuration: URL) -> Bool {
+        guard command.hasPrefix(executable.path + " ") else { return false }
+        let arguments = command.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        guard arguments.first == executable.path, let value = ForgejoDaemonCommand.parse(arguments: arguments),
+              value.hasPrefix("/") else { return false }
+        return URL(fileURLWithPath: value).standardizedFileURL.path == configuration.standardizedFileURL.path
+    }
 }
 
 public actor RunnerServiceController {
@@ -75,6 +89,9 @@ public actor RunnerServiceController {
     private let githubCLIOverride: String?
     private let userID: UInt32
     private let forgejoAPI: any ForgejoAPIRequesting
+    /// How long a stop waits for the listener to exit. A busy listener cancels its job
+    /// before exiting, which can take several seconds after the signal.
+    private let stopExitTimeout: TimeInterval
     private struct ForgejoStateCache { var status: RunnerStatus; var expires: Date }
     private var forgejoStateCache: [String: ForgejoStateCache] = [:]
     private var domain: String { "gui/\(userID)" }
@@ -82,9 +99,12 @@ public actor RunnerServiceController {
 
     public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser, forgejoAPI: any ForgejoAPIRequesting = ForgejoAPIClient()) {
         self.homeDirectory = homeDirectory.standardizedFileURL; self.executor = SystemProcessExecutor(); self.userID = getuid(); self.githubCLIOverride = nil; self.forgejoAPI = forgejoAPI
+        self.stopExitTimeout = Self.defaultStopExitTimeout
     }
-    init(homeDirectory: URL, executor: any ProcessExecuting, userID: UInt32 = getuid(), githubCLIPath: String = "/usr/bin/gh", forgejoAPI: any ForgejoAPIRequesting = ForgejoAPIClient()) {
+    init(homeDirectory: URL, executor: any ProcessExecuting, userID: UInt32 = getuid(), githubCLIPath: String = "/usr/bin/gh", forgejoAPI: any ForgejoAPIRequesting = ForgejoAPIClient(),
+         stopExitTimeout: TimeInterval = defaultStopExitTimeout) {
         self.homeDirectory = homeDirectory.standardizedFileURL; self.executor = executor; self.userID = userID; self.githubCLIOverride = githubCLIPath; self.forgejoAPI = forgejoAPI
+        self.stopExitTimeout = stopExitTimeout
     }
 
     public func snapshots(for runners: [InstalledRunner], allowRemoteActivity: Bool = true) async -> [RunnerSnapshot] {
@@ -92,7 +112,7 @@ public actor RunnerServiceController {
     }
     private func snapshots(for runners: [InstalledRunner], freshForgejoState: Bool, allowRemoteActivity: Bool = true) async -> [RunnerSnapshot] {
         guard !runners.isEmpty else { return [] }
-        async let processes = try? executor.run(ProcessRequest(executable: "/bin/ps", arguments: ["-ww", "-axo", "pid=,ppid=,command="]))
+        async let processes = try? executor.run(Self.processListRequest)
         async let services = try? executor.run(ProcessRequest(executable: "/bin/launchctl", arguments: ["list"]))
         async let disabled = try? executor.run(ProcessRequest(executable: "/bin/launchctl", arguments: ["print-disabled", domain]))
         let (processResult, serviceResult, disabledResult) = await (processes, services, disabled)
@@ -142,27 +162,76 @@ public actor RunnerServiceController {
     public func stop(_ runner: InstalledRunner, force: Bool = false) async throws {
         try validateRunner(runner)
         try await requireIdle(runner, force: force)
+        try await performStop(runner)
+    }
+    /// Stops a validated runner whose busy state the caller has already checked.
+    private func performStop(_ runner: InstalledRunner) async throws {
         if let descriptor = try optionalService(for: runner) {
             let target = domain + "/" + descriptor.label
             let state = try await executor.run(ProcessRequest(executable: "/bin/launchctl", arguments: ["print", target]))
+            // Only "not found" proves the service is unloaded. Killing the process of
+            // a service launchd still supervises would let KeepAlive restart it.
+            guard !state.timedOut, !state.truncated, state.status == 0 || state.status == Self.launchctlServiceNotFound else {
+                throw RunnerServiceError("Cannot verify whether the runner service is loaded. The runner was not stopped.")
+            }
             if state.status == 0 {
+                _ = try await checked(executor, ProcessRequest(executable: "/bin/launchctl", arguments: ["bootout", target]), operation: "Stop runner")
+            }
+        } else if let plist = try stalePlist(for: runner) {
+            // The marker's plist was deleted, but launchd can still supervise the
+            // service it loaded from that file. Unload it only when launchd reports
+            // exactly that path, so another service with the same label is never touched.
+            let target = domain + "/" + plist.deletingPathExtension().lastPathComponent
+            let state = try await executor.run(ProcessRequest(executable: "/bin/launchctl", arguments: ["print", target]))
+            guard !state.timedOut, !state.truncated, state.status == 0 || state.status == Self.launchctlServiceNotFound else {
+                throw RunnerServiceError("Cannot verify whether the runner service is loaded. The runner was not stopped.")
+            }
+            if state.status == 0, Self.parseLoadedServicePath(state.output) == plist.path {
                 _ = try await checked(executor, ProcessRequest(executable: "/bin/launchctl", arguments: ["bootout", target]), operation: "Stop runner")
             }
         }
         // A runner started manually in Terminal is not owned by launchd. Target only
         // the validated listener PID; never pkill a name shared by other runners.
-        let processes = try await checked(executor, ProcessRequest(executable: "/bin/ps", arguments: ["-ww", "-axo", "pid=,ppid=,command="]), operation: "Inspect runner processes")
-        if let pid = RunnerProcesses(processes.output).pid(for: runner) {
-            _ = try await checked(executor, ProcessRequest(executable: "/bin/kill", arguments: ["-TERM", String(pid)]), operation: "Stop manually started runner")
-        }
+        let processes = try await checked(executor, Self.processListRequest, operation: "Inspect runner processes")
+        guard let pid = RunnerProcesses(processes.output).pid(for: runner) else { return }
+        let termination = ProcessRequest(executable: "/bin/kill", arguments: ["-TERM", String(pid)])
+        let result = try await executor.run(termination)
+        guard result.status != 0 || result.timedOut || result.truncated else { try await waitForExit(of: runner); return }
+        // The process can exit on its own between the snapshot and the signal, so a
+        // failed signal is an error only while the process is still present. Nothing
+        // was signalled, so there is no shutdown to wait for.
+        let remaining = try await checked(executor, Self.processListRequest, operation: "Verify the runner stopped")
+        guard RunnerProcesses(remaining.output).pid(for: runner) != nil else { return }
+        _ = try requireSuccess(result, of: termination, operation: "Stop manually started runner")
     }
+    /// A signal does not prove the runner exited, and another supervisor may start
+    /// it again. Poll briefly so a surviving process is never reported as stopped.
+    private func waitForExit(of runner: InstalledRunner) async throws {
+        let attempts = max(1, Int((stopExitTimeout / Self.exitPollInterval).rounded(.up)))
+        for _ in 0..<attempts {
+            try await Task.sleep(nanoseconds: UInt64(Self.exitPollInterval * 1_000_000_000))
+            let processes = try await checked(executor, Self.processListRequest, operation: "Verify the runner stopped")
+            if RunnerProcesses(processes.output).pid(for: runner) == nil { return }
+        }
+        throw RunnerServiceError("The runner process is still running after the stop request. It may still be shutting down, or another service restarted it. Refresh to check its state.")
+    }
+    private static let processListRequest = ProcessRequest(executable: "/bin/ps", arguments: ["-ww", "-axo", "pid=,ppid=,command="])
+    static let defaultStopExitTimeout: TimeInterval = 10
+    private static let exitPollInterval: TimeInterval = 0.25
 
     public func setEnabled(_ enabled: Bool, for runner: InstalledRunner, force: Bool = false) async throws {
         try validateRunner(runner)
         if !enabled { try await requireIdle(runner, force: force) }
         let descriptor = try await ensureService(for: runner)
-        if !enabled { try await stop(runner, force: force) }
         _ = try await checked(executor, ProcessRequest(executable: "/bin/launchctl", arguments: [enabled ? "enable" : "disable", domain + "/" + descriptor.label]), operation: enabled ? "Enable runner" : "Disable runner")
+        guard !enabled else { return }
+        // Disable first, so a failed stop cannot leave the runner enabled. A job can
+        // start while the service is prepared and disabled, so check again right
+        // before stopping; a busy runner then stays disabled but keeps its job.
+        do {
+            try await requireIdle(runner, force: force)
+            try await performStop(runner)
+        } catch { throw RunnerServiceError("Disabled, but stopping failed: " + error.localizedDescription) }
     }
 
     public func setStartsAtLogin(_ enabled: Bool, for runner: InstalledRunner) async throws {
@@ -201,7 +270,7 @@ public actor RunnerServiceController {
         } catch {
             if let descriptor, let data = try? PropertyListSerialization.data(fromPropertyList: descriptor.dictionary, format: .xml, options: 0) { try? data.write(to: descriptor.url, options: .atomic) }
             if let markerData { try? markerData.write(to: marker, options: .atomic) }
-            throw error
+            throw Self.stoppedAfterFailedRemoval(error)
         }
         if trashFiles {
             #if os(macOS)
@@ -213,6 +282,11 @@ public actor RunnerServiceController {
         }
     }
 
+    /// Removal stops the runner before unregistering it and does not restart it
+    /// when unregistering fails.
+    private static func stoppedAfterFailedRemoval(_ error: Error) -> RunnerServiceError {
+        RunnerServiceError(error.localizedDescription + " The runner was stopped and remains stopped. Start it again to resume taking jobs.")
+    }
     private func requireIdle(_ runner: InstalledRunner, force: Bool) async throws {
         guard !force else { return }
         let state = await snapshots(for: [runner], freshForgejoState: true).first
@@ -267,12 +341,32 @@ public actor RunnerServiceController {
     }
     private func optionalService(for runner: InstalledRunner) throws -> ServiceDescriptor? {
         let marker = runner.directory.appendingPathComponent(".service")
-        if FileManager.default.fileExists(atPath: marker.path) { return try service(for: runner) }
+        if FileManager.default.fileExists(atPath: marker.path) {
+            // A marker left behind after its plist was deleted means there is no
+            // service, so starting can install a fresh one.
+            return try isStaleServiceMarker(marker) ? nil : service(for: runner)
+        }
         if runner.provider == .forgejo, let label = runner.serviceLabel,
            Self.isSafeServiceLabel(label), FileManager.default.fileExists(atPath: launchAgents.appendingPathComponent(label + ".plist").path) {
             return try service(for: runner)
         }
         return nil
+    }
+    /// True when the marker names a missing plist with a safe label directly in
+    /// the user's LaunchAgents folder. Anything else is still validated in full.
+    /// The missing plist a stale marker names, if the marker is stale.
+    private func stalePlist(for runner: InstalledRunner) throws -> URL? {
+        let marker = runner.directory.appendingPathComponent(".service")
+        guard !Self.isMissing(marker), try isStaleServiceMarker(marker) else { return nil }
+        return URL(fileURLWithPath: try runnerText(marker)).standardizedFileURL
+    }
+    private func isStaleServiceMarker(_ marker: URL) throws -> Bool {
+        let path = try runnerText(marker)
+        guard path.hasPrefix("/") else { return false }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard url.deletingLastPathComponent().path == launchAgents.path, url.pathExtension == "plist",
+              Self.isSafeServiceLabel(url.deletingPathExtension().lastPathComponent) else { return false }
+        return Self.isMissing(url)
     }
     private func service(for runner: InstalledRunner) throws -> ServiceDescriptor {
         let marker = runner.directory.appendingPathComponent(".service")
@@ -282,12 +376,16 @@ public actor RunnerServiceController {
             path = launchAgents.appendingPathComponent(label + ".plist").path
         } else { throw RunnerServiceError("This runner has no validated user LaunchAgent.") }
         guard path.hasPrefix("/") else { throw RunnerServiceError("Runner .service must point to an absolute LaunchAgent plist path.") }
-        let url = URL(fileURLWithPath: path).standardizedFileURL
-        guard url.deletingLastPathComponent().path == launchAgents.path,
-              url.resolvingSymlinksInPath().path == url.path,
-              !((try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? true) else {
-            throw RunnerServiceError("This runner service is outside your LaunchAgents folder or uses a symbolic link. It will not be modified.")
-        }
+        return try validatedService(at: URL(fileURLWithPath: path).standardizedFileURL, for: runner)
+    }
+    /// Validates that a plist directly in the user's LaunchAgents folder is this
+    /// installation's service and belongs to this account.
+    private func validatedService(at url: URL, for runner: InstalledRunner) throws -> ServiceDescriptor {
+        let unsafeLocation = RunnerServiceError("This runner service is outside your LaunchAgents folder or uses a symbolic link. It will not be modified.")
+        guard url.deletingLastPathComponent().path == launchAgents.path else { throw unsafeLocation }
+        guard !Self.isMissing(url) else { throw RunnerServiceError("The login service file referenced by this runner is missing.") }
+        guard url.resolvingSymlinksInPath().path == url.path,
+              !((try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? true) else { throw unsafeLocation }
         let data = try Data(contentsOf: url)
         guard data.count < 1_000_000,
               let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
@@ -315,9 +413,15 @@ public actor RunnerServiceController {
     }
     private func ensureService(for runner: InstalledRunner) async throws -> ServiceDescriptor {
         if let service = try optionalService(for: runner) { return service }
-        if runner.provider == .forgejo { return try installForgejoService(for: runner) }
+        if runner.provider == .forgejo {
+            try removeStaleServiceMarker(for: runner)
+            return try installForgejoService(for: runner)
+        }
         guard launchAgents.resolvingSymlinksInPath().path == launchAgents.path else { throw RunnerServiceError("The LaunchAgents directory uses a symbolic link. No service was installed.") }
+        if let service = try adoptExistingService(for: runner) { return service }
         guard FileManager.default.fileExists(atPath: runner.directory.appendingPathComponent("svc.sh").path) else { throw RunnerServiceError("This runner installation has no svc.sh. Reinstall the official runner package.") }
+        // svc.sh writes the marker through the shell, which would follow a link.
+        try removeStaleServiceMarker(for: runner)
         _ = try await checked(executor, ProcessRequest(executable: "/bin/bash", arguments: [runner.directory.appendingPathComponent("env.sh").path], directory: runner.directory), operation: "Capture runner tool environment")
         _ = try await checked(executor, ProcessRequest(executable: "/bin/bash", arguments: [runner.directory.appendingPathComponent("svc.sh").path, "install"], directory: runner.directory), operation: "Install runner login service")
         var descriptor = try service(for: runner)
@@ -327,6 +431,31 @@ public actor RunnerServiceController {
         let data = try PropertyListSerialization.data(fromPropertyList: descriptor.dictionary, format: .xml, options: 0)
         try data.write(to: descriptor.url, options: .atomic)
         return descriptor
+    }
+    /// svc.sh refuses to overwrite an existing plist. When the marker is missing
+    /// or stale but this installation's plist is still present, reconnect it and
+    /// keep its startup policy instead of reinstalling.
+    private func adoptExistingService(for runner: InstalledRunner) throws -> ServiceDescriptor? {
+        guard runner.provider == .github, let label = runner.serviceLabel, Self.isSafeServiceLabel(label) else { return nil }
+        let url = launchAgents.appendingPathComponent(label + ".plist").standardizedFileURL
+        guard !Self.isMissing(url) else { return nil }
+        let descriptor = try validatedService(at: url, for: runner)
+        guard descriptor.label == label else { throw RunnerServiceError("The runner LaunchAgent does not match this installation. It will not be modified.") }
+        try removeStaleServiceMarker(for: runner)
+        try Data(descriptor.url.path.utf8).write(to: runner.directory.appendingPathComponent(".service"), options: .atomic)
+        return descriptor
+    }
+    /// Removes a marker only after confirming it is a regular file in this runner
+    /// directory that names a missing plist. A missing marker needs no work.
+    private func removeStaleServiceMarker(for runner: InstalledRunner) throws {
+        let marker = runner.directory.appendingPathComponent(".service")
+        guard !Self.isMissing(marker) else { return }
+        let values = try? marker.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey])
+        guard marker.deletingLastPathComponent().resolvingSymlinksInPath().path == runner.directory.standardizedFileURL.path,
+              values?.isSymbolicLink == false, values?.isRegularFile == true, try isStaleServiceMarker(marker) else {
+            throw RunnerServiceError("The runner’s .service marker could not be validated. It was not replaced.")
+        }
+        try FileManager.default.removeItem(at: marker)
     }
     private struct SystemServiceStates { var pids: [String: Int32] = [:]; var disabledLabels: Set<String> = []; var unavailable: Set<String> = [] }
     /// Reads system LaunchDaemon state without privileges. launchctl exits with
@@ -348,6 +477,13 @@ public actor RunnerServiceController {
         return states
     }
     private static let launchctlServiceNotFound: Int32 = 113
+    /// The plist path launchd loaded a service from: the top-level `path` key only.
+    static func parseLoadedServicePath(_ text: String) -> String? {
+        for line in text.split(separator: "\n") where line.hasPrefix("\tpath = ") {
+            return String(line.dropFirst("\tpath = ".count))
+        }
+        return nil
+    }
     static func parseSystemServicePID(_ text: String) -> Int32? {
         // Only the service's own top-level key; nested blocks are indented further.
         for line in text.split(separator: "\n") where line.hasPrefix("\tpid = ") {
@@ -454,7 +590,7 @@ public actor RunnerServiceController {
         } catch {
             if let descriptor, let data = try? PropertyListSerialization.data(fromPropertyList: descriptor.dictionary, format: .xml, options: 0) { try? data.write(to: descriptor.url, options: .atomic) }
             if let markerData { try? markerData.write(to: marker, options: .atomic) }
-            throw error
+            throw Self.stoppedAfterFailedRemoval(error)
         }
         let metadata = runner.directory.appendingPathComponent(RunnerInstallationDescriptor.fileName)
         let retired = runner.directory.appendingPathComponent("runningman-runner.removed-" + UUID().uuidString + ".json")
@@ -524,6 +660,11 @@ public actor RunnerServiceController {
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// True only when nothing exists at the path, not even a dangling symbolic link.
+    private static func isMissing(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) != 0 && errno == ENOENT
+    }
     private static func isSafeServiceLabel(_ label: String) -> Bool {
         label.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$"#, options: .regularExpression) != nil
     }

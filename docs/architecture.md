@@ -28,12 +28,12 @@ System LaunchDaemon runners are observed, never controlled. Their state comes fr
 
 - Startup edits update RunAtLoad atomically without restarting a live service. Simple imported KeepAlive policies are backed up privately and disabled on disk when login startup is off; restoration checks the service identity and other settings. External edits win, and complex conditions are refused.
 - Start loads and kickstarts only the selected enabled service, without a kill/restart flag.
-- Stop unloads that service without changing its persistent enabled or startup policy.
-- Disable stops the selected runner and persists launchd's disabled override. Enable clears that override without starting it.
-- Creating a missing service for a manually installed runner defaults to startup disabled; opting into login startup is a separate action.
+- Stop unloads that service without changing its persistent enabled or startup policy. Only `launchctl print` exit status 113 counts as not loaded; any other failure refuses before unloading or signalling. A listener or daemon still present ten seconds after its SIGTERM (time for a busy runner to cancel its job) is reported as an error, not as stopped. When the signal itself fails, one process read decides.
+- Disable persists launchd's disabled override first, then rechecks activity and stops the selected runner; a busy runner or a failed stop is reported as such, with the runner already disabled. Enable clears that override without starting it.
+- Creating a missing service for a manually installed runner defaults to startup disabled; opting into login startup is a separate action. A `.service` marker naming a missing plist counts as no service (Stop still unloads a service launchd reports as loaded from exactly that path), and a matching plist without a marker is reconnected with its startup policy instead of being reinstalled.
 - Busy or uncertain observations refuse interruption unless the caller supplies the explicitly confirmed force option.
 
-Removal requests a short-lived GitHub removal token, stops the selected runner, removes its service metadata and unregisters it with GitHub. Failure restores local service metadata. Files remain by default; the service API supports an explicitly requested move to macOS Trash after successful unregister.
+Removal requests a short-lived GitHub removal token, stops the selected runner, removes its service metadata and unregisters it with GitHub. Failure restores local service metadata and says that the runner remains stopped. Files remain by default; the service API supports an explicitly requested move to macOS Trash after successful unregister.
 
 ## Registration
 
@@ -47,7 +47,7 @@ Partial installations are preserved because remote registration may already have
 
 Forgejo registration uses its modern repository, organization, user or administrator runner API. Its official release assets do not include a native Mac binary, so explicit creation installs the checksummed Homebrew core formula, copies that binary into the owned installation and writes a private per-user service. Node.js for JavaScript actions is a separate host prerequisite. The API token stays in the login Keychain; the runner receives its own connection credential in a private file referenced by its configuration. Discovery and diagnostics do not open either credential file.
 
-Forgejo daemon PIDs establish a live process, not an idle worker. With remote monitoring enabled, bounded, cached server runner status can establish idle or active state. Stop, disable and unregister recheck activity freshly. Without that evidence, activity remains unknown and interruption requires explicit confirmation. A startup checkbox never reloads a live process.
+Forgejo daemon PIDs establish a live process, not an idle worker. Process arguments are matched with the same daemon-command parser as LaunchAgent arguments, so flag order and `--config=` forms do not matter. Because `ps` does not show a working directory, only an absolute configuration path identifies a daemon; one started with a relative path is found through its launchd service PID or not at all. With remote monitoring enabled, bounded, cached server runner status can establish idle or active state. Stop, disable and unregister recheck activity freshly. Without that evidence, activity remains unknown and interruption requires explicit confirmation. A startup checkbox never reloads a live process.
 
 ## Workload and utilisation
 
