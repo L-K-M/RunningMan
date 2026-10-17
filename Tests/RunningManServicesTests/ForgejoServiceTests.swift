@@ -187,7 +187,8 @@ final class ForgejoServiceTests: XCTestCase {
         let runner = try await create()
         await api.configure(failDelete: true)
         let controller = RunnerServiceController(homeDirectory: home, executor: executor, forgejoAPI: api)
-        do { try await controller.delete(runner); XCTFail("Expected remote delete refusal") } catch {}
+        do { try await controller.delete(runner); XCTFail("Expected remote delete refusal") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("The runner was stopped and remains stopped."), error.localizedDescription) }
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(RunnerInstallationDescriptor.fileName).path))
         let marker = try String(contentsOf: root.appendingPathComponent(".service"), encoding: .utf8)
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker))
@@ -356,6 +357,15 @@ final class ForgejoServiceTests: XCTestCase {
         do { try await controller.delete(runner, force: true); XCTFail("Expected missing API metadata refusal") }
         catch { XCTAssertTrue(error.localizedDescription.contains("registration ID")) }
         XCTAssertEqual(before, try Data(contentsOf: plist))
+        let commands = await executor.recorded()
+        XCTAssertTrue(commands.isEmpty)
+    }
+    func testImportedServiceWithMissingPlistReportsMissingFile() async throws {
+        let (runner, plist) = try importedFixture()
+        try FileManager.default.removeItem(at: plist)
+        let controller = RunnerServiceController(homeDirectory: home, executor: executor, forgejoAPI: api)
+        do { try await controller.setStartsAtLogin(false, for: runner); XCTFail("Expected missing service refusal") }
+        catch { XCTAssertEqual(error.localizedDescription, "The login service file referenced by this runner is missing.") }
         let commands = await executor.recorded()
         XCTAssertTrue(commands.isEmpty)
     }

@@ -28,12 +28,12 @@ System LaunchDaemon runners are observed, never controlled. Their state comes fr
 
 - Startup edits update RunAtLoad atomically without restarting a live service. Simple imported KeepAlive policies are backed up privately and disabled on disk when login startup is off; restoration checks the service identity and other settings. External edits win, and complex conditions are refused.
 - Start loads and kickstarts only the selected enabled service, without a kill/restart flag.
-- Stop unloads that service without changing its persistent enabled or startup policy.
-- Disable stops the selected runner and persists launchd's disabled override. Enable clears that override without starting it.
-- Creating a missing service for a manually installed runner defaults to startup disabled; opting into login startup is a separate action.
+- Stop unloads that service without changing its persistent enabled or startup policy. Only `launchctl print` exit status 113 counts as not loaded; any other failure refuses before unloading or signalling. A listener or daemon still present about two seconds after its SIGTERM is reported as an error, not as stopped.
+- Disable persists launchd's disabled override first, then stops the selected runner; a failed stop is reported as such, with the runner already disabled. Enable clears that override without starting it.
+- Creating a missing service for a manually installed runner defaults to startup disabled; opting into login startup is a separate action. A `.service` marker naming a missing plist counts as no service, and a matching plist without a marker is reconnected with its startup policy instead of being reinstalled.
 - Busy or uncertain observations refuse interruption unless the caller supplies the explicitly confirmed force option.
 
-Removal requests a short-lived GitHub removal token, stops the selected runner, removes its service metadata and unregisters it with GitHub. Failure restores local service metadata. Files remain by default; the service API supports an explicitly requested move to macOS Trash after successful unregister.
+Removal requests a short-lived GitHub removal token, stops the selected runner, removes its service metadata and unregisters it with GitHub. Failure restores local service metadata and says that the runner remains stopped. Files remain by default; the service API supports an explicitly requested move to macOS Trash after successful unregister.
 
 ## Registration
 
