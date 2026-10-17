@@ -5,10 +5,11 @@ project_root="$(cd "$(dirname "$0")/.." && pwd)"
 configuration=release
 universal=false
 zip_app=false
+arch_tag="$(uname -m)"
 for argument in "$@"; do
   case "$argument" in
     --debug) configuration=debug ;;
-    --universal) universal=true ;;
+    --universal) universal=true; arch_tag=universal ;;
     --zip) zip_app=true ;;
     *) echo "Usage: scripts/build-app.sh [--debug] [--universal] [--zip]" >&2; exit 2 ;;
   esac
@@ -40,7 +41,7 @@ case "$build_number" in *[!0-9]*|"") echo "git returned an invalid commit count:
 
 # Start from an empty bundle so files a previous build left behind never ship,
 # and drop the old zip so it cannot outlive the app it was made from.
-rm -rf "$app" "$output_directory/RunningMan.zip" "$output_directory/RunningMan.zip.sha256"
+rm -rf "$app" "$output_directory"/RunningMan-macos-*.zip "$output_directory"/RunningMan-macos-*.zip.sha256
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary_directory/RunningMan" "$app/Contents/MacOS/RunningMan"
 
@@ -70,7 +71,7 @@ plutil -lint "$app/Contents/Info.plist"
 codesign --force --sign - "$app"
 codesign --verify --strict "$app"
 if $zip_app; then
-  ditto -c -k --keepParent "$app" "$output_directory/RunningMan.zip"
-  (cd "$output_directory" && shasum -a 256 RunningMan.zip > RunningMan.zip.sha256)
+  ditto -c -k --keepParent "$app" "$output_directory/RunningMan-macos-$arch_tag.zip"
+  (cd "$output_directory" && shasum -a 256 "RunningMan-macos-$arch_tag.zip" > "RunningMan-macos-$arch_tag.zip.sha256")
 fi
 echo "Built $app"

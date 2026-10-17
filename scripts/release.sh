@@ -4,7 +4,7 @@
 # commit and tag together. The push starts .github/workflows/release.yml,
 # which runs the tests, builds the universal app (scripts/build-app.sh
 # --universal --zip, with RUNNINGMAN_VERSION from the tag), creates the GitHub
-# Release with RunningMan-v<version>.zip plus its .sha256, then publishes the
+# Release with RunningMan-v<version>-macos-universal.zip plus its .sha256, then publishes the
 # update manifest that installed apps check once a day (runningman/latest.json
 # in ajilach/ajila-tg-app-updates). This script never writes the manifest.
 #
@@ -68,7 +68,7 @@ SLUG=${SLUG:-L-K-M/RunningMan}
 
 # Point the marked README link at the new version's zip. The marker pair stays
 # on one line; the inner content never contains '<'.
-ZIP="RunningMan-$TAG.zip"
+ZIP="RunningMan-$TAG-macos-universal.zip"
 LINE="[$ZIP](https://github.com/$SLUG/releases/download/$TAG/$ZIP)"
 grep -q '<!-- latest-release -->' README.md || fail "README.md has no <!-- latest-release --> marker"
 awk -v repl="<!-- latest-release -->$LINE<!-- /latest-release -->" \
@@ -94,6 +94,6 @@ if ! git push -q --atomic origin main "$TAG"; then
   exit 1
 fi
 echo "pushed main and $TAG"
-echo "the release workflow now builds RunningMan-$TAG.zip (a few minutes): https://github.com/$SLUG/actions/workflows/release.yml"
+echo "the release workflow now builds RunningMan-$TAG-macos-universal.zip (a few minutes): https://github.com/$SLUG/actions/workflows/release.yml"
 echo "download, once it is done: https://github.com/$SLUG/releases/tag/$TAG"
 echo "its last job publishes the update manifest; installed apps notice $TAG within a day: https://github.com/ajilach/ajila-tg-app-updates/blob/main/runningman/latest.json"

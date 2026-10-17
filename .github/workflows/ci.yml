@@ -46,8 +46,8 @@ jobs:
         with:
           name: RunningMan-macOS
           path: |
-            dist/RunningMan.zip
-            dist/RunningMan.zip.sha256
+            dist/RunningMan-macos-universal.zip
+            dist/RunningMan-macos-universal.zip.sha256
           retention-days: 7
       - name: Upload UI screenshots
         if: always()
