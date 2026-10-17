@@ -27,7 +27,11 @@ while kill -0 "$pid" 2>/dev/null; do
   sleep 1
 done
 wait "$pid"
+captures=()
 for name in overview runners workload history cleanup overview-dark workload-dark cleanup-dark; do
   test -s "$output/$name.png"
+  captures+=("$output/$name.png")
 done
+# A capture that only shows the toolbar is still a non-empty PNG.
+swift "$project_root/scripts/check-screenshots.swift" "${captures[@]}"
 echo "Captured eight isolated RunningMan views in $output"

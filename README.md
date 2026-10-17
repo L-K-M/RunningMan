@@ -146,7 +146,7 @@ scripts/smoke-test.sh
 
 `scripts/build.sh` also accepts `--universal`, `--zip`, `--run`, `--install` (replaces `/Applications/RunningMan.app`) and `--clean`. To cut a release, run `scripts/release.sh 1.2.0` on a clean, pushed `main` (`--dry-run` checks first): it updates the marked download link above, commits, tags `v1.2.0` and pushes both, after which the release workflow builds and publishes the zip and announces it to installed apps.
 
-The smoke test opens a clearly labelled synthetic preview workspace and saves eight screenshots under **.local/screenshots/**, including light/dark workload and cleanup views. It never controls installed runners. You can explore that preview manually:
+The smoke test opens a clearly labelled synthetic preview workspace and saves eight screenshots under **.local/screenshots/**, including light/dark workload and cleanup views, and fails if a section comes out blank. It captures only RunningMan's own window, so it needs macOS 14.4 or later but no Screen Recording permission. It never controls installed runners or changes your saved window layout. You can explore that preview manually:
 
 ~~~sh
 open -na dist/RunningMan.app --args --demo
