@@ -94,6 +94,28 @@ private struct WindowIdentity: NSViewRepresentable {
     weak var model: AppModel?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) { model?.stopMonitoring() }
+
+    /// Stop-after-job requests survive a relaunch, but nothing acts on them while RunningMan is closed,
+    /// and quitting would cut off a creation or runner action in progress, so ask first.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard SnapshotCapture.destination == nil, !isSessionEnding, let warning = model?.quitWarning else { return .terminateNow }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = warning.title
+        alert.informativeText = warning.message
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+
+    /// macOS asks every app to quit when you log out, restart or shut down. A prompt then would cancel
+    /// that, and the requests are persisted anyway.
+    private var isSessionEnding: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent, event.eventID == kAEQuitApplication,
+              let reason = event.attributeDescriptor(forKeyword: kAEQuitReason)?.enumCodeValue else { return false }
+        return [kAELogOut, kAEReallyLogOut, kAEShowRestartDialog, kAERestart, kAEShowShutdownDialog, kAEShutDown].contains(reason)
+    }
 }
 
 @MainActor private enum SnapshotCapture {

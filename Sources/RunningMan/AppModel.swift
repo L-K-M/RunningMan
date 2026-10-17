@@ -56,6 +56,18 @@ enum PendingConfirmation: Equatable {
     case clearHistory
 }
 
+/// Keeps stop-after-job requests (runner ids) across launches. RunningMan must be running to act on
+/// them; the first refresh after launch ends requests whose runner is gone or already stopped.
+struct DrainRequestStore {
+    static let key = "drainingRunnerIDs"
+    let defaults: UserDefaults
+    /// Runner ids are standardized installation paths; anything else cannot match a runner.
+    func load() -> Set<String> { Set((defaults.stringArray(forKey: Self.key) ?? []).filter { $0.hasPrefix("/") }) }
+    func save(_ ids: Set<String>) {
+        if ids.isEmpty { defaults.removeObject(forKey: Self.key) } else { defaults.set(ids.sorted(), forKey: Self.key) }
+    }
+}
+
 @MainActor @Observable
 final class AppModel {
     var runners: [RunnerSnapshot] = []
@@ -88,6 +100,7 @@ final class AppModel {
     var busyRunnerIDs: Set<String> = []
     var drainingRunnerIDs: Set<String> = [] {
         didSet {
+            if drainingRunnerIDs != oldValue { drainRequestStore?.save(drainingRunnerIDs) }
             // Failure records belong to a request; ending the request ends its retry state.
             if drainFailures.keys.contains(where: { !drainingRunnerIDs.contains($0) }) {
                 drainFailures = drainFailures.filter { drainingRunnerIDs.contains($0.key) }
@@ -127,6 +140,8 @@ final class AppModel {
     @ObservationIgnored private let history: RunnerHistoryStore
     @ObservationIgnored private let eventStore: ActivityStore
     @ObservationIgnored private let activitySamples: RunnerActivityStore
+    /// Nil in demo mode, which must not write preferences.
+    @ObservationIgnored private let drainRequestStore: DrainRequestStore?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var workloadTask: Task<WorkloadReport, Never>?
     @ObservationIgnored private var lastWorkloadAttempt: Date?
@@ -147,6 +162,7 @@ final class AppModel {
         history = RunnerHistoryStore(fileURL: Self.supportDirectory.appendingPathComponent("jobs.json"))
         eventStore = ActivityStore(url: Self.supportDirectory.appendingPathComponent("activity.json"))
         activitySamples = RunnerActivityStore(fileURL: Self.supportDirectory.appendingPathComponent("observed-activity.json"))
+        drainRequestStore = demoMode ? nil : DrainRequestStore(defaults: .standard)
         if demoMode {
             remoteMonitoringEnabled = true
             loadDemo()
@@ -159,7 +175,32 @@ final class AppModel {
             defaultForgejoServer = preferences.string(forKey: "defaultForgejoServer") ?? forgejoServers.first?.absoluteString ?? ""
             importedDirectories = (preferences.stringArray(forKey: "importedRunnerDirectories") ?? [])
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            drainingRunnerIDs = drainRequestStore?.load() ?? []
         }
+    }
+
+    /// What quitting now would leave undone, or nil when RunningMan can quit without asking.
+    var quitWarning: (title: String, message: String)? {
+        demoMode ? nil : Self.quitWarning(isCreating: isCreating, actionsInProgress: busyRunnerIDs.count, drainRequests: drainingRunnerIDs.count)
+    }
+
+    nonisolated static func quitWarning(isCreating: Bool, actionsInProgress: Int, drainRequests: Int) -> (title: String, message: String)? {
+        var notes: [String] = []
+        if isCreating {
+            notes.append("A runner is being created. Quitting interrupts the setup and can leave an incomplete installation folder.")
+        }
+        if actionsInProgress > 0 {
+            notes.append(actionsInProgress == 1 ? "A runner action is still in progress and may not finish." : "\(actionsInProgress) runner actions are still in progress and may not finish.")
+        }
+        if drainRequests > 0 {
+            notes.append((drainRequests == 1 ? "1 runner is waiting to stop after its job." : "\(drainRequests) runners are waiting to stop after their jobs.")
+                + " RunningMan keeps these requests and resumes them when you open it again, but it must be running to stop the runners.")
+        }
+        guard !notes.isEmpty else { return nil }
+        let title = isCreating ? "Quit while a runner is being created?"
+            : drainRequests > 0 ? (drainRequests == 1 ? "Quit while a runner waits to stop?" : "Quit while runners wait to stop?")
+            : "Quit while a runner action is in progress?"
+        return (title, notes.joined(separator: "\n\n"))
     }
 
     var selectedRunner: RunnerSnapshot? { runners.first { $0.id == selectedRunnerID } }
@@ -274,7 +315,7 @@ final class AppModel {
     /// Stop-after-job requests that no longer apply: the runner is gone, or it is definitely stopped
     /// (it crashed or was stopped outside RunningMan). An unverifiable state is not evidence of a stop,
     /// and a runner with an action in progress is left to that action.
-    static func endedDrainRequests(_ requests: Set<String>, runners: [RunnerSnapshot], inProgress: Set<String>) -> Set<String> {
+    nonisolated static func endedDrainRequests(_ requests: Set<String>, runners: [RunnerSnapshot], inProgress: Set<String>) -> Set<String> {
         let snapshots = Dictionary(runners.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return requests.subtracting(inProgress).filter { id in
             guard let runner = snapshots[id] else { return true }

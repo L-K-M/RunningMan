@@ -225,6 +225,43 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.jobs.isEmpty)
     }
 
+    func testDrainRequestStoreRoundTripsThroughSuite() throws {
+        let suiteName = "RunningManTests.drain.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let ids: Set<String> = ["/synthetic/runners/alpha", "/synthetic/runners/beta"]
+        DrainRequestStore(defaults: defaults).save(ids)
+        XCTAssertEqual(DrainRequestStore(defaults: defaults).load(), ids)
+        DrainRequestStore(defaults: defaults).save([])
+        XCTAssertNil(defaults.object(forKey: DrainRequestStore.key))
+        XCTAssertEqual(DrainRequestStore(defaults: defaults).load(), [])
+        defaults.set(["relative/path", "/synthetic/runners/gamma"], forKey: DrainRequestStore.key)
+        XCTAssertEqual(DrainRequestStore(defaults: defaults).load(), ["/synthetic/runners/gamma"])
+    }
+
+    @MainActor func testDemoStopAfterJobNeverWritesPreferencesOrAsksBeforeQuitting() {
+        let before = UserDefaults.standard.stringArray(forKey: DrainRequestStore.key)
+        let model = AppModel(demoMode: true)
+        let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
+        model.perform(.drain, on: busy)
+        XCTAssertTrue(model.drainingRunnerIDs.contains(busy.id))
+        XCTAssertEqual(UserDefaults.standard.stringArray(forKey: DrainRequestStore.key), before)
+        XCTAssertNil(model.quitWarning)
+    }
+
+    func testQuitWarningNamesEveryInterruptedOperation() throws {
+        XCTAssertNil(AppModel.quitWarning(isCreating: false, actionsInProgress: 0, drainRequests: 0))
+        let drains = try XCTUnwrap(AppModel.quitWarning(isCreating: false, actionsInProgress: 0, drainRequests: 2))
+        XCTAssertEqual(drains.title, "Quit while runners wait to stop?")
+        XCTAssertTrue(drains.message.contains("2 runners are waiting to stop after their jobs."))
+        XCTAssertTrue(drains.message.contains("must be running"))
+        let all = try XCTUnwrap(AppModel.quitWarning(isCreating: true, actionsInProgress: 1, drainRequests: 1))
+        XCTAssertEqual(all.title, "Quit while a runner is being created?")
+        XCTAssertTrue(all.message.contains("A runner is being created."))
+        XCTAssertTrue(all.message.contains("A runner action is still in progress"))
+        XCTAssertTrue(all.message.contains("1 runner is waiting to stop after its job."))
+    }
+
     func testDrainFailureRetriesBackOffAndCapAtFiveMinutes() {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         var failure: DrainFailure?
