@@ -121,6 +121,7 @@ final class AppModel {
         self.demoMode = demoMode
         notifier = Notifier(isActive: !demoMode && !CommandLine.arguments.contains("--snapshot-dir"))
         notificationPreferences = demoMode ? NotificationPreferences() : Self.storedNotificationPreferences()
+        notificationAuthorization = notifier.isActive ? .checking : .unavailable
         history = RunnerHistoryStore(fileURL: Self.supportDirectory.appendingPathComponent("jobs.json"))
         eventStore = ActivityStore(url: Self.supportDirectory.appendingPathComponent("activity.json"))
         activitySamples = RunnerActivityStore(fileURL: Self.supportDirectory.appendingPathComponent("observed-activity.json"))

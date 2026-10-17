@@ -101,7 +101,7 @@ struct SettingsView: View {
 
     @ViewBuilder private var notificationStatus: some View {
         switch model.notificationAuthorization {
-        case .authorized:
+        case .authorized, .checking:
             EmptyView()
         case .notDetermined:
             Text("macOS asks for permission the first time you turn one on.")

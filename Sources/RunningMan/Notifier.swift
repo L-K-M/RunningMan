@@ -5,6 +5,8 @@ import UserNotifications
 enum NotificationAuthorization: Equatable {
     /// No app bundle, demo mode or a snapshot capture: notifications are never posted.
     case unavailable
+    /// Active, but macOS has not reported the permission yet.
+    case checking
     case notDetermined, denied, authorized
 }
 
