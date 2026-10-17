@@ -132,12 +132,19 @@ final class RunningManCoreTests: XCTestCase {
         let result = await RunnerDiscovery(homeDirectory: temporary).discover()
         XCTAssertEqual(result.warnings.filter { $0.contains("first 512 entries") }.count, 2)
         XCTAssertTrue(result.warnings.contains { $0.contains("~/actions-runners") })
-        XCTAssertTrue(result.warnings.contains { $0.contains("~/Library/LaunchAgents") })
+        XCTAssertTrue(result.warnings.contains { $0.contains("~/Library/LaunchAgents") && $0.contains("Services listed after those were not checked.") })
         XCTAssertFalse(result.warnings.contains { $0.contains(temporary.path) })
         try FileManager.default.removeItem(at: roots.appendingPathComponent("runner-000"))
         try FileManager.default.removeItem(at: agents.appendingPathComponent("org.example.agent-000.plist"))
         let atLimit = await RunnerDiscovery(homeDirectory: temporary).discover()
         XCTAssertTrue(atLimit.warnings.isEmpty)
+        // Standard folders do not count; 513 other home children do.
+        for index in 0..<513 {
+            try FileManager.default.createDirectory(at: temporary.appendingPathComponent(String(format: "project-%03d", index)), withIntermediateDirectories: true)
+        }
+        let crowdedHome = await RunnerDiscovery(homeDirectory: temporary).discover()
+        XCTAssertTrue(crowdedHome.warnings.contains { $0.contains("your home folder") && $0.contains("Import existing runner") })
+        XCTAssertFalse(crowdedHome.warnings.contains { $0.contains(temporary.path) })
     }
 
     func testListenerJobsIncrementalCompletionAndNoDuplicateEvents() async throws {

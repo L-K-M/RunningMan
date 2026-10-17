@@ -40,7 +40,7 @@ public actor RunnerDiscovery {
                 includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { continue }
             let isHome = root == homeDirectory
             if isHome { children.removeAll { Self.skippedHomeFolders.contains($0.lastPathComponent) } }
-            for child in limitedListing(children, of: root, warnings: &warnings) {
+            for child in limitedListing(children, of: root, kind: .folders, warnings: &warnings) {
                 guard let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { continue }
                 // isDirectory describes a link itself. Runner folders may link to
                 // another volume; links directly in the home folder are not followed
@@ -57,7 +57,7 @@ public actor RunnerDiscovery {
         var forgejoServices: [URL: InstalledRunner] = [:]
         if let files = try? fileManager.contentsOfDirectory(at: agents,
             includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-            for file in limitedListing(files.filter({ $0.pathExtension == "plist" }), of: agents, warnings: &warnings) {
+            for file in limitedListing(files.filter({ $0.pathExtension == "plist" }), of: agents, kind: .services, warnings: &warnings) {
                 guard let plist = Self.plist(at: file), let label = plist["Label"] as? String else { continue }
                 if let forgejo = Self.forgejoService(plist) {
                     candidates.insert(forgejo.directory)
@@ -88,7 +88,7 @@ public actor RunnerDiscovery {
         var systemServices: [URL: InstalledRunner] = [:]
         if let systemDaemonsDirectory, let files = try? fileManager.contentsOfDirectory(at: systemDaemonsDirectory,
             includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-            for file in limitedListing(files.filter({ $0.pathExtension == "plist" }), of: systemDaemonsDirectory, warnings: &warnings) {
+            for file in limitedListing(files.filter({ $0.pathExtension == "plist" }), of: systemDaemonsDirectory, kind: .services, warnings: &warnings) {
                 guard let plist = Self.plist(at: file), plist["UserName"] as? String == userName,
                       var forgejo = Self.forgejoService(plist), systemServices[forgejo.directory] == nil else { continue }
                 forgejo.serviceDomain = .system
@@ -177,9 +177,11 @@ public actor RunnerDiscovery {
 
     /// Returns at most `listingLimit` entries in name order, so the inspected subset
     /// stays the same between refreshes, and warns when the folder holds more.
-    private func limitedListing(_ entries: [URL], of folder: URL, warnings: inout [String]) -> ArraySlice<URL> {
+    private enum ListingKind { case folders, services }
+    private func limitedListing(_ entries: [URL], of folder: URL, kind: ListingKind, warnings: inout [String]) -> ArraySlice<URL> {
         if entries.count > Self.listingLimit {
-            warnings.append("Discovery inspected only the first \(Self.listingLimit) entries in \(displayName(of: folder)). Use Import existing runner for any runner that does not appear.")
+            let remedy = kind == .folders ? "Use Import existing runner for any runner that does not appear." : "Services listed after those were not checked."
+            warnings.append("Discovery inspected only the first \(Self.listingLimit) entries in \(displayName(of: folder)). \(remedy)")
         }
         return entries.sorted { $0.lastPathComponent < $1.lastPathComponent }.prefix(Self.listingLimit)
     }
