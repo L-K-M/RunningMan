@@ -50,7 +50,8 @@ public enum SecretRedactor {
         // long enough not to be a login such as git@.
         Rule(#"(://)(?:[^/\s:@]+:[^/\s@]+|[^/\s:@]{16,})@"#, "$1[REDACTED]@"),
         Rule(#"(?i)(authorization\s*[:=]\s*\"?(?:bearer|basic|token)\s+)[^\s\"',;]+"#, "$1[REDACTED]"),
-        Rule(#"(?i)\b(bearer[ \t]+)[A-Za-z0-9._~+/-]{12,}=*"#, "$1[REDACTED]"),
+        // A token has a digit or symbol, so prose such as "Bearer authentication failed" stays readable.
+        Rule(#"(?i)\b(bearer[ \t]+)(?=[A-Za-z0-9._~+/-]{12,})[A-Za-z]*[0-9._~+/-][A-Za-z0-9._~+/-]*=*"#, "$1[REDACTED]"),
         Rule(#"(?i)\b((?:set-)?cookie[ \t]*:[ \t]*)[^\r\n]+"#, "$1[REDACTED]"),
         Rule(#"(?i)(--(?:[a-z]{1,32}-)?(?:token|pat|password|passwd|secret|api-key)(?:\s+|=))(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s\"']+)"#, "$1[REDACTED]"),
         Rule(#"(?i)([?&](?:access_token|token|sig|signature|client_secret|password|code)=)[^&\s\"']+"#, "$1[REDACTED]"),

@@ -62,7 +62,7 @@ final class SecretRedactorTests: XCTestCase {
             ("token: Bearer abcdefghijklmnop0007", ["abcdefghijklmnop0007"])
         ])
         XCTAssertEqual(SecretRedactor.redact("proxy forwarded bearer abcdefghijklmnop0001 upstream"), "proxy forwarded bearer [REDACTED] upstream")
-        assertUnchanged(["Bearer of bad news", "Bearer short12 accepted"])
+        assertUnchanged(["Bearer of bad news", "Bearer short12 accepted", "Bearer authentication failed for runner"])
     }
 
     func testURLCredentialsAreRedactedForAnySchemeWithoutTouchingPlainUsers() {
