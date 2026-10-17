@@ -582,39 +582,76 @@ final class AppModel {
         panel.nameFieldStringValue = "RunningMan-diagnostics.json"
         panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        struct Report: Encodable {
-            struct State: Encodable {
-                var runner: InstalledRunner
-                var status: RunnerStatus
-                var processID: Int32?
-                var startsAtLogin: Bool
-                var enabled: Bool
-            }
-            var generatedAt: Date
-            var runners: [State]
-            var jobs: [RunnerJob]
-            var events: [ActivityEvent]
-            var cleanup: [RunnerCleanupRecord]
-            var logs: [String: String]
-            var warnings: [String]
-        }
-        let report = Report(generatedAt: Date(), runners: runners.map {
-            .init(runner: $0.runner, status: $0.status, processID: $0.processID,
-                  startsAtLogin: $0.startsAtLogin, enabled: $0.isEnabled)
-        }, jobs: jobs, events: events, cleanup: cleanupRecords, logs: logTails.mapValues(SecretRedactor.redact), warnings: warnings)
+        let generatedAt = Date(), runners = self.runners, jobs = self.jobs, events = self.events
+        let cleanup = cleanupRecords, logs = logTails, warnings = self.warnings
         Task {
             do {
                 try await Task.detached {
-                    let encoder = JSONEncoder()
-                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                    encoder.dateEncodingStrategy = .iso8601
-                    let data = try encoder.encode(report)
-                    let scrubbed = SecretRedactor.redact(String(decoding: data, as: UTF8.self))
-                    try Data(scrubbed.utf8).write(to: destination, options: .atomic)
+                    let data = try AppModel.diagnosticsReportData(generatedAt: generatedAt, runners: runners, jobs: jobs,
+                        events: events, cleanup: cleanup, logs: logs, warnings: warnings)
+                    try data.write(to: destination, options: .atomic)
                 }.value
                 record(title: "Diagnostics exported", detail: destination.lastPathComponent, kind: .success)
             } catch { errorMessage = Self.message(error) }
         }
+    }
+
+    private struct DiagnosticsReport: Encodable {
+        struct State: Encodable {
+            var runner: InstalledRunner
+            var status: RunnerStatus
+            var processID: Int32?
+            var startsAtLogin: Bool
+            var enabled: Bool
+        }
+        var generatedAt: Date
+        var runners: [State]
+        var jobs: [RunnerJob]
+        var events: [ActivityEvent]
+        var cleanup: [RunnerCleanupRecord]
+        var logs: [String: String]
+        var warnings: [String]
+    }
+
+    /// Redacts each free-text field once, then encodes. Redacting the encoded JSON instead can
+    /// consume the backslash that escapes a quote, and never sees URLs because the encoder
+    /// escapes their slashes.
+    nonisolated static func diagnosticsReportData(generatedAt: Date, runners: [RunnerSnapshot], jobs: [RunnerJob],
+                                                  events: [ActivityEvent], cleanup: [RunnerCleanupRecord],
+                                                  logs: [String: String], warnings: [String]) throws -> Data {
+        let redact: (String) -> String = SecretRedactor.redact
+        let report = DiagnosticsReport(generatedAt: generatedAt, runners: runners.map {
+            var runner = $0.runner
+            runner.name = redact(runner.name); runner.labels = runner.labels.map(redact); runner.githubURL = exportable(runner.githubURL)
+            return .init(runner: runner, status: $0.status, processID: $0.processID,
+                         startsAtLogin: $0.startsAtLogin, enabled: $0.isEnabled)
+        }, jobs: jobs.map {
+            var job = $0
+            job.name = redact(job.name); job.repository = job.repository.map(redact); job.workflow = job.workflow.map(redact)
+            job.runURL = exportable(job.runURL)
+            return job
+        }, events: events.map {
+            var event = $0
+            event.title = redact(event.title); event.detail = event.detail.map(redact)
+            return event
+        }, cleanup: cleanup.map {
+            var record = $0
+            record.repository = redact(record.repository); record.job = redact(record.job); record.message = record.message.map(redact)
+            record.runURL = exportable(record.runURL)
+            record.paths = record.paths.map { var path = $0; path.path = redact(path.path); path.message = path.message.map(redact); return path }
+            return record
+        }, logs: logs.mapValues(redact), warnings: warnings.map(redact))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(report)
+    }
+
+    /// Remote links are exported only when they carry nothing redaction would hide.
+    private nonisolated static func exportable(_ url: URL?) -> URL? {
+        guard let url, url.user == nil, url.password == nil,
+              SecretRedactor.redact(url.absoluteString) == url.absoluteString else { return nil }
+        return url
     }
 
     private func updateSelectedLog() {

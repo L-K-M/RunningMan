@@ -113,4 +113,30 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(values.count, 1)
         XCTAssertEqual(ActivityIdentity(values[0]), ActivityIdentity(repeated))
     }
+
+    func testDiagnosticsReportRedactsEachFieldOnceAndStaysValidJSON() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let runner = InstalledRunner(name: "build token=abc", directory: URL(fileURLWithPath: "/synthetic/runner"),
+            githubURL: URL(string: "https://deploy:abc@forge.example/example/desktop"), labels: ["self-hosted", "password=abc"])
+        let job = RunnerJob(id: "job", runnerID: runner.id, name: "Deploy token=abc", repository: "example/desktop secret=abc",
+            workflow: "Release api_key=abc", runURL: URL(string: "https://deploy:abc@forge.example/example/desktop/actions/runs/1"),
+            startedAt: start, finishedAt: start.addingTimeInterval(60), outcome: .success)
+        let event = ActivityEvent(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, date: start, runnerID: runner.id,
+            title: "Started token=abc", detail: "clone https://deploy:abc@forge.example/example/desktop.git")
+        let cleanup = RunnerCleanupRecord(id: "cleanup", runnerID: runner.id, repository: "example/desktop", runID: "1",
+            runAttempt: "1", job: "Deploy token=abc", startedAt: start, finishedAt: start.addingTimeInterval(5),
+            status: .success, message: "Removed token=abc")
+        // A quote after a redacted value and a truncated quoted assignment both broke the old
+        // whole-file pass, which consumed the escaping backslash of the encoded quote.
+        let log = "[2026-10-16 10:00:00Z INFO Worker] token=abc\" done\nclone https://deploy:abc@forge.example/example/desktop.git\nexport RUNNER_TOKEN=\""
+        let data = try AppModel.diagnosticsReportData(generatedAt: start, runners: [RunnerSnapshot(runner: runner, status: .idle)],
+            jobs: [job], events: [event], cleanup: [cleanup], logs: [runner.id: log], warnings: ["Could not read token=abc"])
+
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(text.contains("abc"), text)
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let logs = try XCTUnwrap(report["logs"] as? [String: String])
+        XCTAssertEqual(logs[runner.id], "[2026-10-16 10:00:00Z INFO Worker] token=[REDACTED]\" done\nclone https://[REDACTED]@forge.example/example/desktop.git\nexport RUNNER_TOKEN=\"")
+        XCTAssertEqual(report["warnings"] as? [String], ["Could not read token=[REDACTED]"])
+    }
 }
