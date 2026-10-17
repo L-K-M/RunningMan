@@ -8,13 +8,20 @@ struct RunnersView: View {
     private var runners: [RunnerSnapshot] {
         model.filteredRunners.filter { filter.matches($0.status) }.sorted { $0.runner.name.localizedStandardCompare($1.runner.name) == .orderedAscending }
     }
-    @State private var availableWidth: CGFloat = 0
-    private static let minimumListWidth: CGFloat = 300
+    /// Starts wide so the first layout shows the usual list, before its width is known.
+    @State private var availableWidth: CGFloat = .greatestFiniteMagnitude
+    /// Still fits the five-segment status filter.
+    private static let minimumListWidth: CGFloat = 260
     private static let preferredListWidth: CGFloat = 340
-    private static let minimumDetailWidth: CGFloat = 440
+    private static let minimumDetailWidth: CGFloat = 330
+    /// The five status segments need about 260 pt plus the padding around them;
+    /// a narrower list shows the same choices as a menu.
+    private static let segmentedFilterListWidth: CGFloat = 290
+
+    /// The list and the detail at their minimums; the window's minimum width adds the widest sidebar.
+    static let minimumWidth = minimumListWidth + 1 + minimumDetailWidth
 
     /// Gives the detail its minimum before the list grows past its own.
-    /// The window's 1000 pt minimum leaves room for both beside a full sidebar.
     private static func listWidth(in totalWidth: CGFloat) -> CGFloat {
         max(minimumListWidth, min(preferredListWidth, totalWidth - minimumDetailWidth - 1))
     }
@@ -25,9 +32,16 @@ struct RunnersView: View {
         // column grew past the window edge and clipped the runner details.
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                Picker("Show runners", selection: $filter) {
-                    ForEach(RunnerStatusFilter.allCases, id: \.self) { Text($0.title).tag($0) }
-                }.pickerStyle(.segmented).labelsHidden().controlSize(.small)
+                // A segmented picker reports a larger ideal width than it needs, so
+                // ViewThatFits would never pick it; the list's own width decides.
+                Group {
+                    if Self.listWidth(in: availableWidth) >= Self.segmentedFilterListWidth {
+                        filterPicker.pickerStyle(.segmented)
+                    } else {
+                        filterPicker.pickerStyle(.menu).fixedSize()
+                    }
+                }.labelsHidden().controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 14).padding(.vertical, 12)
                 Divider()
                 if runners.isEmpty {
@@ -61,6 +75,12 @@ struct RunnersView: View {
         // passing the content's minimum up to the NavigationSplitView.
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { availableWidth = $0 }
+    }
+
+    private var filterPicker: some View {
+        Picker("Show runners", selection: $filter) {
+            ForEach(RunnerStatusFilter.allCases, id: \.self) { Text($0.title).tag($0) }
+        }
     }
 
     private func runnerRow(_ snapshot: RunnerSnapshot) -> some View {

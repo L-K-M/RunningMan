@@ -30,7 +30,7 @@ struct CleanupView: View {
                         ForEach(model.runners) { Text($0.runner.name).tag($0.id) }
                     }.frame(maxWidth: 200).controlSize(.small)
                 }
-                HStack(spacing: 12) {
+                MetricRow {
                     MetricTile(title: "Build files removed", value: cleanupBytes(removedBytes),
                                footnote: "Reported file size · last 24 hours", symbol: "externaldrive.badge.checkmark", tint: StatusTone.positive.text)
                     MetricTile(title: "Completed cleanups", value: String(completed.count), footnote: "Last 24 hours", symbol: "checkmark.circle", tint: StatusTone.positive.text)
@@ -38,7 +38,7 @@ struct CleanupView: View {
                                footnote: "Unconfirmed or incomplete removal", symbol: "exclamationmark.triangle", tint: StatusTone.warning.text)
                     MetricTile(title: "Awaiting cleanup", value: String(reports.filter { $0.status == .pending }.count),
                                footnote: "No final report yet", symbol: "hourglass", tint: StatusTone.active.text)
-                }.fixedSize(horizontal: false, vertical: true)
+                }
                 Surface {
                     Label("Only that job’s build workspace", systemImage: "lock.shield").font(.system(size: 13, weight: .semibold))
                     Text("Release workflows build in a separate temporary copy, then remove it after upload attempts. Runner settings, diagnostic logs, cleanup reports, development checkouts and shared tool caches are kept outside that workspace.")

@@ -53,7 +53,7 @@ struct WorkloadView: View {
                         }.padding(.top, 12)
                     }
                 }
-                HStack(spacing: 12) {
+                MetricRow {
                     MetricTile(title: "Compatible queued", value: fleet.hasQueueEvidence ? "\(fleet.queuedCount)\(fleet.isIncomplete ? "+" : "")" : "—",
                                footnote: "Shared across matching runners", symbol: "tray.full",
                                tint: fleet.queuedCount > 0 ? StatusTone.warning.text : StatusTone.neutral.text)
@@ -66,7 +66,7 @@ struct WorkloadView: View {
                     MetricTile(title: "Busy runners", value: "\(model.busyCount)", footnote: "At least one active job", symbol: "bolt.fill", tint: StatusTone.active.text)
                     MetricTile(title: "Configured slots", value: "\(model.runners.reduce(0) { $0 + $1.runner.capacity })",
                                footnote: "Local concurrency limit", symbol: "square.stack.3d.up", tint: RunningManStyle.accentText)
-                }.fixedSize(horizontal: false, vertical: true)
+                }
                 VStack(alignment: .leading, spacing: 12) {
                     SectionHeading(title: "Runner activity", subtitle: "Last 24 hours · sampled while RunningMan is monitoring") { EmptyView() }
                     if model.runners.isEmpty {

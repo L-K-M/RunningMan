@@ -239,6 +239,56 @@ struct MetricTile: View {
     }
 }
 
+/// Metric tiles side by side, or two per row when the window leaves each tile less than
+/// `minimumTileWidth`. A row of one or two tiles always stays on one line. Tiles in a row
+/// share the height of the tallest one.
+struct MetricRow: Layout {
+    var spacing: CGFloat = 12
+    var minimumTileWidth: CGFloat = 160
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? CGFloat(subviews.count) * minimumTileWidth + CGFloat(max(0, subviews.count - 1)) * spacing
+        let heights = rowHeights(subviews, width: width)
+        return CGSize(width: width, height: heights.reduce(0, +) + CGFloat(max(0, heights.count - 1)) * spacing)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let columns = columnCount(subviews.count, width: bounds.width)
+        let tileWidth = Self.tileWidth(bounds.width, columns: columns, spacing: spacing)
+        var y = bounds.minY
+        for (row, height) in rowHeights(subviews, width: bounds.width).enumerated() {
+            for column in 0..<columns {
+                let index = row * columns + column
+                guard index < subviews.count else { break }
+                subviews[index].place(at: CGPoint(x: bounds.minX + CGFloat(column) * (tileWidth + spacing), y: y),
+                                      proposal: ProposedViewSize(width: tileWidth, height: height))
+            }
+            y += height + spacing
+        }
+    }
+
+    private func columnCount(_ count: Int, width: CGFloat) -> Int {
+        Self.columns(for: count, width: width, spacing: spacing, minimumTileWidth: minimumTileWidth)
+    }
+
+    static func columns(for count: Int, width: CGFloat, spacing: CGFloat, minimumTileWidth: CGFloat) -> Int {
+        guard count > 2 else { return max(count, 1) }
+        return tileWidth(width, columns: count, spacing: spacing) >= minimumTileWidth ? count : 2
+    }
+
+    private func rowHeights(_ subviews: Subviews, width: CGFloat) -> [CGFloat] {
+        let columns = columnCount(subviews.count, width: width)
+        let proposal = ProposedViewSize(width: Self.tileWidth(width, columns: columns, spacing: spacing), height: nil)
+        return stride(from: 0, to: subviews.count, by: columns).map { start in
+            subviews[start..<min(start + columns, subviews.count)].map { $0.sizeThatFits(proposal).height }.max() ?? 0
+        }
+    }
+
+    private static func tileWidth(_ width: CGFloat, columns: Int, spacing: CGFloat) -> CGFloat {
+        max(0, (width - CGFloat(columns - 1) * spacing) / CGFloat(columns))
+    }
+}
+
 /// The title block of a sheet.
 struct SheetHeader: View {
     let symbol: String
