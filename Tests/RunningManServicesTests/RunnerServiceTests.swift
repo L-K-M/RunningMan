@@ -320,13 +320,15 @@ final class InstallerSafetyTests: XCTestCase {
     }
     func testSurvivingDescendantHoldingOutputDoesNotDelayResult() async throws {
         let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-child-pid-" + UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: pidFile) }
+        // Also runs when the command throws, so the background sleep never outlives the test.
+        defer {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8), let pid = Int32(text) { kill(pid, SIGKILL) }
+            try? FileManager.default.removeItem(at: pidFile)
+        }
         // The background sleep inherits both pipes and outlives the command.
         let script = #"/bin/sleep 30 & printf '%s' "$!" > "$1"; echo done"#
         let start = Date()
         let result = try await SystemProcessExecutor().run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", script, "fixture", pidFile.path]))
-        let pid = try XCTUnwrap(Int32(try String(contentsOf: pidFile, encoding: .utf8)))
-        kill(pid, SIGKILL)
         XCTAssertLessThan(Date().timeIntervalSince(start), 5)
         XCTAssertEqual(result.status, 0)
         XCTAssertFalse(result.timedOut)
