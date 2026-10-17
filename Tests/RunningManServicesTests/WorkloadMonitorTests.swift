@@ -213,6 +213,7 @@ final class WorkloadMonitorTests: XCTestCase {
         let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo(), requestBudget: 9).refresh(runners: [local]).scopes[0]
         XCTAssertEqual(scope.state, .partial)
         XCTAssertEqual(scope.jobs.map(\.name), ["Mac"])
+        XCTAssertNil(scope.queuedCount, "Repositories skipped by the stop may hold more queued jobs")
         let message = scope.message ?? ""
         XCTAssertEqual(message.components(separatedBy: "Request budget reached").count, 2, message)
         for unrelated in ["coverage is unavailable", "could not be read", "labels could not", "permission"] {
@@ -231,6 +232,7 @@ final class WorkloadMonitorTests: XCTestCase {
         let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo(), requestBudget: 7).refresh(runners: [runner()]).scopes[0]
         XCTAssertEqual(scope.state, .partial)
         XCTAssertEqual(scope.jobs.map(\.name), ["Mac"])
+        XCTAssertNil(scope.queuedCount, "The unread workflow may hold more queued jobs")
         XCTAssertTrue(scope.message?.contains("Request budget reached") == true)
         XCTAssertFalse(scope.message?.contains("could not be read") == true)
     }

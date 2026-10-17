@@ -229,6 +229,8 @@ public actor WorkloadMonitor {
         }
         var allJobs: [WorkloadJob] = []
         var successfulRepositories = 0
+        // A stopped pass skipped repositories or workflows, so its totals are only a lower bound.
+        var truncated = false
         for repository in repositories {
             let repositoryParts = repository.split(separator: "/")
             guard repositoryParts.count == 2, repositoryParts.allSatisfy({ $0.unicodeScalars.allSatisfy(allowed.contains) }) else {
@@ -236,15 +238,15 @@ public actor WorkloadMonitor {
             }
             do {
                 let jobs = provider == .github
-                    ? try await githubJobs(repository: repository, messages: &messages)
-                    : try await forgejoJobs(repository: repository, server: server, messages: &messages)
+                    ? try await githubJobs(repository: repository, messages: &messages, truncated: &truncated)
+                    : try await forgejoJobs(repository: repository, server: server, messages: &messages, truncated: &truncated)
                 allJobs += jobs
                 successfulRepositories += 1
             } catch {
                 try Self.rethrowIfFatal(error)
                 if let stop = Self.passStopMessage(error) {
                     guard successfulRepositories > 0 else { throw error }
-                    messages.append(stop); break
+                    messages.append(stop); truncated = true; break
                 }
                 messages.append("\(repository): queue coverage is unavailable for this refresh.")
             }
@@ -268,7 +270,7 @@ public actor WorkloadMonitor {
             message: messages.isEmpty ? "Compatible queued jobs are shared by this runner pool; assignment is decided by the server." : Array(Set(messages)).sorted().joined(separator: " "),
             jobs: deduplicated, runnerIDs: runners.map(\.id), runnerLabels: labelMap,
             capacity: runners.reduce(0) { $0 + $1.capacity }, remoteBusyRunnerIDs: remoteBusyIDs,
-            countsKnown: !missingJobLabels && !(labelsUnverified && !allJobs.isEmpty))
+            countsKnown: !missingJobLabels && !truncated && !(labelsUnverified && !allJobs.isEmpty))
     }
 
     private func wideForgejoJobs(server: URL, registrationPath: String, runners: [InstalledRunner]) async throws -> WorkloadScopeSnapshot {
@@ -321,7 +323,7 @@ public actor WorkloadMonitor {
             scopeIdentifier: registrationPath, scopeTitle: Self.wideScopeTitle(registrationPath))
     }
 
-    private func githubJobs(repository: String, messages: inout [String]) async throws -> [WorkloadJob] {
+    private func githubJobs(repository: String, messages: inout [String], truncated: inout Bool) async throws -> [WorkloadJob] {
         var runs: [[String: Any]] = []
         // Query every nonterminal run state. A newest-runs-only query would miss
         // long-lived queued work behind newer completed builds.
@@ -352,7 +354,7 @@ public actor WorkloadMonitor {
                 try Self.rethrowIfFatal(error)
                 if let stop = Self.passStopMessage(error) {
                     guard readableJobLists > 0 else { throw error }
-                    messages.append(stop); break
+                    messages.append(stop); truncated = true; break
                 }
                 messages.append("\(repository): one workflow's jobs could not be read.")
             }
@@ -362,7 +364,7 @@ public actor WorkloadMonitor {
         return jobs
     }
 
-    private func forgejoJobs(repository: String, server: URL, messages: inout [String]) async throws -> [WorkloadJob] {
+    private func forgejoJobs(repository: String, server: URL, messages: inout [String], truncated: inout Bool) async throws -> [WorkloadJob] {
         var runs: [[String: Any]] = []
         for status in ["waiting", "running", "blocked"] {
             let object = try await forge("repos/\(repository)/actions/runs?status=\(status)&limit=20&page=1", server: server)
@@ -391,7 +393,7 @@ public actor WorkloadMonitor {
                 try Self.rethrowIfFatal(error)
                 if let stop = Self.passStopMessage(error) {
                     guard readableJobLists > 0 else { throw error }
-                    messages.append(stop); break
+                    messages.append(stop); truncated = true; break
                 }
                 messages.append("\(repository): one workflow's jobs are unavailable on this server version.")
             }
