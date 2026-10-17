@@ -138,6 +138,39 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.events.contains { $0.title == "Stop after job ended: \(busy.runner.name) is no longer running" })
     }
 
+    @MainActor func testStopAfterJobEndsWhenActivityStaysUnverifiable() {
+        let model = AppModel(demoMode: true)
+        let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
+        model.perform(.drain, on: busy)
+        let index = model.runners.firstIndex { $0.id == busy.id }!
+        let start = Date()
+        model.runners[index].status = .unknown
+        model.processDrainRequests(now: start)
+        model.processDrainRequests(now: start.addingTimeInterval(AppModel.drainUnknownLimit - 1))
+        XCTAssertTrue(model.drainingRunnerIDs.contains(busy.id))
+        // A verified state in between restarts the wait.
+        model.runners[index].status = .busy
+        model.processDrainRequests(now: start.addingTimeInterval(AppModel.drainUnknownLimit))
+        model.runners[index].status = .unknown
+        model.processDrainRequests(now: start.addingTimeInterval(AppModel.drainUnknownLimit + 1))
+        XCTAssertTrue(model.drainingRunnerIDs.contains(busy.id))
+        model.processDrainRequests(now: start.addingTimeInterval(2 * AppModel.drainUnknownLimit + 1))
+        XCTAssertFalse(model.drainingRunnerIDs.contains(busy.id))
+        XCTAssertTrue(model.events.contains { $0.title == "Stop after job cancelled: \(busy.runner.name)’s activity could not be verified" })
+    }
+
+    @MainActor func testStopAfterJobCanBeCancelledWhileAnActionRuns() {
+        let model = AppModel(demoMode: true)
+        let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
+        model.perform(.drain, on: busy)
+        model.busyRunnerIDs.insert(busy.id)
+        model.perform(.drain, on: busy)
+        XCTAssertFalse(model.drainingRunnerIDs.contains(busy.id))
+        // A new request still waits for the action to finish.
+        model.perform(.drain, on: busy)
+        XCTAssertFalse(model.drainingRunnerIDs.contains(busy.id))
+    }
+
     @MainActor func testEndedDrainRequestsIgnoreRunnersWithActionsInProgress() {
         let runner = InstalledRunner(name: "synthetic", directory: URL(fileURLWithPath: "/synthetic/runner"))
         let stopped = RunnerSnapshot(runner: runner, status: .stopped)

@@ -126,6 +126,9 @@ struct RunnerDetailView: View {
                     if model.drainingRunnerIDs.contains(snapshot.id) {
                         Label("Stopping when idle", systemImage: "moon.zzz").font(.system(size: 10)).foregroundStyle(.orange)
                             .fixedSize()
+                            .help(snapshot.status == .unknown
+                                ? "RunningMan cannot verify this runner’s activity right now. The request ends if that lasts \(Int(AppModel.drainUnknownLimit / 60)) minutes."
+                                : "Stops this runner once its current job finishes.")
                         if let failure = model.drainFailures[snapshot.id] {
                             Label(failure.message, systemImage: "exclamationmark.triangle.fill")
                                 .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)

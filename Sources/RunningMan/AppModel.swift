@@ -105,6 +105,7 @@ final class AppModel {
             if drainFailures.keys.contains(where: { !drainingRunnerIDs.contains($0) }) {
                 drainFailures = drainFailures.filter { drainingRunnerIDs.contains($0.key) }
             }
+            drainUnknownSince = drainUnknownSince.filter { drainingRunnerIDs.contains($0.key) }
         }
     }
     var drainFailures: [String: DrainFailure] = [:]
@@ -153,6 +154,10 @@ final class AppModel {
     @ObservationIgnored var showMainWindow: (() -> Void)?
     /// How long a busy demo runner takes to finish its job after stop-after-job; tests shorten it.
     @ObservationIgnored var demoDrainDelay: Duration = .seconds(4)
+    /// When each requested runner's state became unverifiable, so the request cannot wait on it forever.
+    @ObservationIgnored private var drainUnknownSince: [String: Date] = [:]
+    /// How long a stop-after-job request waits for an unverifiable state to clear before it ends.
+    static let drainUnknownLimit: TimeInterval = 10 * 60
 
     static var supportDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -335,9 +340,25 @@ final class AppModel {
         }
         // Requests restored from an earlier launch can predate turning server monitoring off.
         if !remoteMonitoringEnabled { cancelForgejoDrainRequests() }
+        endUnverifiableDrainRequests(now: now)
         for runner in runners where drainingRunnerIDs.contains(runner.id) && runner.status == .idle && !busyRunnerIDs.contains(runner.id) {
             if let failure = drainFailures[runner.id], failure.retryDate > now { continue }
             runAction(.stop, on: runner, origin: .automatic)
+        }
+    }
+
+    /// An unknown state is not evidence of a stop, but a request must not wait on it silently,
+    /// possibly across relaunches: it ends with an explanation once the state stays unknown too long.
+    private func endUnverifiableDrainRequests(now: Date) {
+        for runner in runners where drainingRunnerIDs.contains(runner.id) && !busyRunnerIDs.contains(runner.id) {
+            guard runner.status == .unknown else { drainUnknownSince[runner.id] = nil; continue }
+            let since = drainUnknownSince[runner.id] ?? now
+            drainUnknownSince[runner.id] = since
+            guard now.timeIntervalSince(since) >= Self.drainUnknownLimit else { continue }
+            drainingRunnerIDs.remove(runner.id)
+            record(title: "Stop after job cancelled: \(runner.runner.name)’s activity could not be verified", runnerID: runner.id,
+                   detail: "Its state stayed unknown for \(Int(Self.drainUnknownLimit / 60)) minutes. Check its logs or server connection in Workload, then request the stop again.",
+                   kind: .warning)
         }
     }
 
@@ -415,13 +436,14 @@ final class AppModel {
     func selectionChanged() { updateSelectedLog() }
 
     func perform(_ action: RunnerAction, on runner: RunnerSnapshot) {
-        guard !busyRunnerIDs.contains(runner.id) else { return }
-        // Cancelling is always allowed, even when a new request would be refused.
+        // Cancelling is always allowed, even when a new request would be refused or an action is
+        // in progress. An automatic stop already running still finishes; it is just not retried.
         if action == .drain, drainingRunnerIDs.contains(runner.id) {
             drainingRunnerIDs.remove(runner.id)
             record(title: "Stop after job cancelled", runnerID: runner.id, detail: runner.runner.name)
             return
         }
+        guard !busyRunnerIDs.contains(runner.id) else { return }
         guard requireUserService(runner) else { return }
         if action == .drain {
             if let refusal = drainRefusal(for: runner) {
