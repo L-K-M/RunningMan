@@ -2,7 +2,8 @@ import SwiftUI
 import RunningManCore
 
 struct ContentView: View {
-    /// Fits half of a 1920-pt-wide display and a quarter of a 1080-pt-tall one.
+    /// Fits a quarter tile of a 1920 by 1080 pt display (half its width and half its height,
+    /// 960 by 540 pt, less the menu bar), and so also a half tile.
     static let minimumSize = CGSize(width: 800, height: 500)
     @Environment(AppModel.self) private var model
     @Environment(AppUpdateChecker.self) private var updates
