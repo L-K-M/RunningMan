@@ -94,6 +94,8 @@ struct RunnerDetailView: View {
     @State private var followLog = true
     private var runner: InstalledRunner { snapshot.runner }
     private var isActing: Bool { model.busyRunnerIDs.contains(snapshot.id) }
+    /// System LaunchDaemons are shown read-only; their detail text explains why.
+    private var isControllable: Bool { runner.serviceDomain == .user }
     private var visibleLog: String {
         guard !logSearch.isEmpty else { return model.logText }
         return model.logText.split(separator: "\n", omittingEmptySubsequences: false)
@@ -126,12 +128,14 @@ struct RunnerDetailView: View {
                     }
                     Spacer()
                     if isActing { ProgressView().controlSize(.small) }
-                    if snapshot.status.isRunning || snapshot.processID != nil {
-                        Button("Stop", systemImage: "stop.fill") { model.perform(.stop, on: snapshot) }
-                            .controlSize(.small).disabled(isActing)
-                    } else {
-                        Button("Start runner", systemImage: "play.fill") { model.perform(.start, on: snapshot) }
-                            .buttonStyle(.borderedProminent).controlSize(.small).disabled(isActing || !snapshot.isEnabled)
+                    if isControllable {
+                        if snapshot.status.isRunning || snapshot.processID != nil {
+                            Button("Stop", systemImage: "stop.fill") { model.perform(.stop, on: snapshot) }
+                                .controlSize(.small).disabled(isActing)
+                        } else {
+                            Button("Start runner", systemImage: "play.fill") { model.perform(.start, on: snapshot) }
+                                .buttonStyle(.borderedProminent).controlSize(.small).disabled(isActing || !snapshot.isEnabled)
+                        }
                     }
                 }
                 Picker("Runner details", selection: $tab) {
@@ -166,33 +170,19 @@ struct RunnerDetailView: View {
                                     .help(job.finishedAt == nil ? "No completion result in local logs" : "Recorded job duration")
                             }
                         }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 3)
-                        Button(model.drainingRunnerIDs.contains(snapshot.id) ? "Cancel stop when idle" : "Stop when idle", systemImage: "moon.zzz") { model.perform(.drain, on: snapshot) }
-                            .controlSize(.small).padding(.top, 11)
-                            .disabled(isActing)
-                            .help("Stop after this job finishes. Keep RunningMan open until the runner stops.")
+                        if isControllable {
+                            Button(model.drainingRunnerIDs.contains(snapshot.id) ? "Cancel stop when idle" : "Stop when idle", systemImage: "moon.zzz") { model.perform(.drain, on: snapshot) }
+                                .controlSize(.small).padding(.top, 11)
+                                .disabled(isActing)
+                                .help("Stop after this job finishes. Keep RunningMan open until the runner stops.")
+                        }
                     }
                 }
                 if let detail = snapshot.detail, !detail.isEmpty {
                     Label { Text(detail).textSelection(.enabled) } icon: { Image(systemName: snapshot.status == .attention ? "exclamationmark.triangle" : "info.circle") }
                         .font(.system(size: 11)).foregroundStyle(snapshot.status == .attention ? Color.orange : .secondary)
                 }
-                Surface {
-                    Text("Service controls").font(.system(size: 13, weight: .semibold)).padding(.bottom, 15)
-                    Toggle(isOn: Binding(get: { snapshot.isEnabled }, set: { model.perform($0 ? .enable : .disable, on: snapshot) })) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Runner enabled").font(.system(size: 12, weight: .medium))
-                            Text("Allow this runner service to be started. Disabling stops it.").font(.system(size: 10)).foregroundStyle(.secondary)
-                        }
-                    }.toggleStyle(.switch).controlSize(.small).disabled(isActing)
-                    Divider().padding(.vertical, 13)
-                    Toggle(isOn: Binding(get: { snapshot.startsAtLogin }, set: { model.setStartup($0, for: snapshot) })) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Start automatically at login").font(.system(size: 12, weight: .medium))
-                            Text("Launch when you sign in to your macOS account. This does not start or stop it now.")
-                                .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        }
-                    }.toggleStyle(.switch).controlSize(.small).disabled(isActing)
-                }
+                if isControllable { serviceControls }
                 Surface {
                     SectionHeading(title: "Workload", subtitle: "Compatible queue and recent usage") {
                         Button("View fleet") { model.section = .workload }.buttonStyle(.link).font(.system(size: 11))
@@ -220,7 +210,7 @@ struct RunnerDetailView: View {
                     Divider().padding(.vertical, 9)
                     detailRow("Process ID", value: snapshot.processID.map(String.init) ?? "Not running")
                     Divider().padding(.vertical, 9)
-                    detailRow("Service", value: runner.serviceLabel ?? "No user service installed")
+                    detailRow("Service", value: runner.serviceLabel.map { runner.serviceDomain == .system ? $0 + " (system)" : $0 } ?? "No user service installed")
                     Divider().padding(.vertical, 9)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Folder").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -240,6 +230,26 @@ struct RunnerDetailView: View {
                     }
                 }
             }.padding(22)
+        }
+    }
+
+    private var serviceControls: some View {
+        Surface {
+            Text("Service controls").font(.system(size: 13, weight: .semibold)).padding(.bottom, 15)
+            Toggle(isOn: Binding(get: { snapshot.isEnabled }, set: { model.perform($0 ? .enable : .disable, on: snapshot) })) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Runner enabled").font(.system(size: 12, weight: .medium))
+                    Text("Allow this runner service to be started. Disabling stops it.").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }.toggleStyle(.switch).controlSize(.small).disabled(isActing)
+            Divider().padding(.vertical, 13)
+            Toggle(isOn: Binding(get: { snapshot.startsAtLogin }, set: { model.setStartup($0, for: snapshot) })) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Start automatically at login").font(.system(size: 12, weight: .medium))
+                    Text("Launch when you sign in to your macOS account. This does not start or stop it now.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }.toggleStyle(.switch).controlSize(.small).disabled(isActing)
         }
     }
 

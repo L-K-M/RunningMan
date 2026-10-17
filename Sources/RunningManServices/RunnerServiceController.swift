@@ -36,8 +36,9 @@ struct RunnerProcesses {
     func pid(for runner: InstalledRunner) -> Int32? {
         if runner.provider == .forgejo {
             guard let executable = runner.executableURL, let configuration = runner.configurationURL else { return nil }
-            let expected = executable.path + " daemon --config " + configuration.path
-            return entries.first { $0.command == expected }?.pid
+            let daemon = executable.path + " daemon "
+            let expected = [daemon + "--config " + configuration.path, daemon + "-c " + configuration.path]
+            return entries.first { expected.contains($0.command) }?.pid
         }
         return entries.first { $0.command.hasPrefix(runner.directory.path + "/bin/Runner.Listener ") || $0.command == runner.directory.path + "/bin/Runner.Listener" }?.pid
     }
@@ -87,22 +88,26 @@ public actor RunnerServiceController {
         let processList = RunnerProcesses(processResult?.status == 0 ? processResult!.output : "")
         let loaded = Self.parseServices(serviceResult?.status == 0 ? serviceResult!.output : "", including: Set(runners.compactMap(\.serviceLabel)))
         let disabledLabels = Self.parseDisabled(disabledResult?.status == 0 ? disabledResult!.output : "")
+        let system = await systemServiceStates(for: runners.filter { $0.serviceDomain == .system })
         let forgejoStates = allowRemoteActivity ? await forgejoStatuses(runners: runners, processes: processList, loaded: loaded, fresh: freshForgejoState) : [:]
         return runners.map { runner in
-            let descriptor = try? service(for: runner)
+            let isSystem = runner.serviceDomain == .system
+            // A user LaunchAgent that happens to share a system service's label is not that service.
+            let descriptor = isSystem ? nil : try? service(for: runner)
             let label = descriptor?.label ?? runner.serviceLabel
-            let servicePID = label.flatMap { loaded[$0] }.flatMap { $0 > 0 ? $0 : nil }
+            let servicePID = isSystem ? system.pids[runner.id] : label.flatMap { loaded[$0] }.flatMap { $0 > 0 ? $0 : nil }
             let pid = processList.pid(for: runner) ?? servicePID
-            let enabled = !disabledLabels.contains(label ?? "")
+            let enabled = !(isSystem ? system.disabledLabels : disabledLabels).contains(label ?? "")
             let remoteState = forgejoStates[runner.id] ?? .unknown
             let busy = runner.provider == .forgejo ? pid != nil && remoteState == .busy : processList.isBusy(runner, servicePID: servicePID)
             let unavailable = processResult?.status != 0 || serviceResult?.status != 0 || disabledResult?.status != 0 || processResult?.truncated == true || serviceResult?.truncated == true || disabledResult?.truncated == true || processResult?.timedOut == true || serviceResult?.timedOut == true || disabledResult?.timedOut == true
+                || (isSystem && system.unavailable.contains(runner.id))
             let status: RunnerStatus = busy ? .busy : unavailable ? .unknown : pid != nil ? (runner.provider == .forgejo ? remoteState : .idle) : !enabled ? .disabled : .stopped
             let activityUnverified = runner.provider == .forgejo && pid != nil && remoteState == .unknown
             let readOnlyForgejo = runner.provider == .forgejo && descriptor == nil && !FileManager.default.fileExists(atPath: runner.directory.appendingPathComponent(RunnerInstallationDescriptor.fileName).path)
             return RunnerSnapshot(runner: runner, status: status, processID: pid,
                                   startsAtLogin: descriptor?.startsAtLogin ?? false, isEnabled: enabled,
-                                  detail: unavailable ? "Some local process or launch service information could not be read." : descriptor?.hasUncertainStartupPolicy == true ? "This service has additional automatic launch conditions. Login behavior cannot be fully inferred; changing its startup policy is unavailable." : readOnlyForgejo ? "This imported Forgejo service could not be validated for local controls. Its process is visible, but configuration and credentials will not be read or changed." : activityUnverified ? "The Forgejo daemon is running, but job activity could not be verified. Connect API access for this server to verify idle state." : descriptor == nil ? "No validated login service is installed. Start installs one for your account." : nil)
+                                  detail: unavailable ? "Some local process or launch service information could not be read." : isSystem ? Self.systemServiceDetail(label: label) : descriptor?.hasUncertainStartupPolicy == true ? "This service has additional automatic launch conditions. Login behavior cannot be fully inferred; changing its startup policy is unavailable." : readOnlyForgejo ? "This imported Forgejo service could not be validated for local controls. Its process is visible, but configuration and credentials will not be read or changed." : activityUnverified ? "The Forgejo daemon is running, but job activity could not be verified. Connect API access for this server to verify idle state." : descriptor == nil ? "No validated login service is installed. Start installs one for your account." : nil)
         }
     }
 
@@ -162,6 +167,7 @@ public actor RunnerServiceController {
     }
 
     public func delete(_ runner: InstalledRunner, trashFiles: Bool = false, force: Bool = false) async throws {
+        try requireUserService(runner)
         if runner.provider == .forgejo { try await deleteForgejo(runner, trashFiles: trashFiles, force: force); return }
         try validateRunner(runner)
         try await requireIdle(runner, force: force)
@@ -202,7 +208,13 @@ public actor RunnerServiceController {
         guard state?.status != .busy else { throw RunnerServiceError("This runner is executing a job. Wait for it to finish or explicitly force the action.") }
         guard state?.status != .unknown else { throw RunnerServiceError("Cannot verify whether this runner is busy. No action was taken.") }
     }
+    private func requireUserService(_ runner: InstalledRunner) throws {
+        guard runner.serviceDomain == .user else {
+            throw RunnerServiceError("This runner is managed by a system LaunchDaemon. RunningMan does not start, stop or change system services; manage it with an administrator account.")
+        }
+    }
     private func validateRunner(_ runner: InstalledRunner) throws {
+        try requireUserService(runner)
         let root = runner.directory.standardizedFileURL
         guard root.isFileURL, root.path != "/", root.path != homeDirectory.path,
               root.resolvingSymlinksInPath().path == root.path else { throw RunnerServiceError("Runner directory must be a real, dedicated directory, not a symbolic link or your home directory.") }
@@ -305,6 +317,38 @@ public actor RunnerServiceController {
         try data.write(to: descriptor.url, options: .atomic)
         return descriptor
     }
+    private struct SystemServiceStates { var pids: [String: Int32] = [:]; var disabledLabels: Set<String> = []; var unavailable: Set<String> = [] }
+    /// Reads system LaunchDaemon state without privileges. launchctl exits with
+    /// 113 when a label is not loaded, which means not running rather than unknown.
+    private func systemServiceStates(for runners: [InstalledRunner]) async -> SystemServiceStates {
+        var states = SystemServiceStates()
+        guard !runners.isEmpty else { return states }
+        let disabled = try? await executor.run(ProcessRequest(executable: "/bin/launchctl", arguments: ["print-disabled", "system"]))
+        let disabledReadable = disabled?.status == 0 && disabled?.truncated == false && disabled?.timedOut == false
+        if disabledReadable, let disabled { states.disabledLabels = Self.parseDisabled(disabled.output) }
+        for runner in runners {
+            guard disabledReadable, let label = runner.serviceLabel, Self.isSafeServiceLabel(label),
+                  let result = try? await executor.run(ProcessRequest(executable: "/bin/launchctl", arguments: ["print", "system/" + label])),
+                  !result.truncated, !result.timedOut, result.status == 0 || result.status == Self.launchctlServiceNotFound else {
+                states.unavailable.insert(runner.id); continue
+            }
+            if result.status == 0 { states.pids[runner.id] = Self.parseSystemServicePID(result.output) }
+        }
+        return states
+    }
+    private static let launchctlServiceNotFound: Int32 = 113
+    static func parseSystemServicePID(_ text: String) -> Int32? {
+        // Only the service's own top-level key; nested blocks are indented further.
+        for line in text.split(separator: "\n") where line.hasPrefix("\tpid = ") {
+            if let pid = Int32(line.dropFirst("\tpid = ".count)), pid > 0 { return pid }
+        }
+        return nil
+    }
+    private static func systemServiceDetail(label: String?) -> String {
+        let service = label.map { "the system service " + $0 } ?? "a system service"
+        return "This runner is managed by \(service). RunningMan shows its process, logs and jobs, but does not start, stop or change system services, and cannot verify whether it is running a job."
+    }
+
     private func forgejoStatuses(runners: [InstalledRunner], processes: RunnerProcesses, loaded: [String: Int32], fresh: Bool) async -> [String: RunnerStatus] {
         var result: [String: RunnerStatus] = [:]
         struct Lookup: Sendable { var runnerID: String; var server: URL; var path: String }
@@ -492,7 +536,8 @@ public actor RunnerServiceController {
         return result
     }
     static func parseDisabled(_ text: String) -> Set<String> {
-        let pattern = #"\"([^\"]+)\"\s*=>\s*true"#
+        // Current macOS prints "disabled"/"enabled"; older releases print "true"/"false".
+        let pattern = #"\"([^\"]+)\"\s*=>\s*(?:true|disabled)\b"#
         guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString
         return Set(expression.matches(in: text, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) })

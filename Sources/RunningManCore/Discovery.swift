@@ -1,12 +1,21 @@
 import Foundation
 
-/// Discovers only explicit installations, shallow home folders, and user LaunchAgents.
-/// It never executes a runner or opens its credential files.
+/// Discovers only explicit installations, shallow home folders, user LaunchAgents and
+/// Forgejo system LaunchDaemons that run as this user. It never executes a runner or
+/// opens its credential files.
 public actor RunnerDiscovery {
+    public static let systemDaemonsDirectory = URL(fileURLWithPath: "/Library/LaunchDaemons", isDirectory: true)
     private let homeDirectory: URL
+    private let systemDaemonsDirectory: URL?
+    private let userName: String
     private let fileManager = FileManager.default
-    public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    /// System services are opt-in, so a synthetic home directory never picks up
+    /// the machine's real LaunchDaemons. The app passes `systemDaemonsDirectory`.
+    public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+                systemDaemonsDirectory: URL? = nil, userName: String = NSUserName()) {
         self.homeDirectory = homeDirectory.standardizedFileURL
+        self.systemDaemonsDirectory = systemDaemonsDirectory?.standardizedFileURL
+        self.userName = userName
     }
 
     public func discover(additionalDirectories: [URL] = []) -> DiscoveryResult {
@@ -55,6 +64,21 @@ public actor RunnerDiscovery {
                 }
             }
         }
+        // An administrator can install the Forgejo daemon as a system service that
+        // runs as this user. RunningMan never changes system services, so a folder
+        // a system service uses is monitored only, even with a user LaunchAgent or
+        // a public descriptor: stopping either could interrupt the system daemon.
+        var systemServices: [URL: InstalledRunner] = [:]
+        if let systemDaemonsDirectory, let files = try? fileManager.contentsOfDirectory(at: systemDaemonsDirectory,
+            includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+            for file in files.filter({ $0.pathExtension == "plist" }).prefix(512) {
+                guard let plist = Self.plist(at: file), plist["UserName"] as? String == userName,
+                      var forgejo = Self.forgejoService(plist), systemServices[forgejo.directory] == nil else { continue }
+                forgejo.serviceDomain = .system
+                candidates.insert(forgejo.directory)
+                systemServices[forgejo.directory] = forgejo
+            }
+        }
         var runners: [InstalledRunner] = []
         var resolved = Set<String>()
         for directory in candidates.sorted(by: { $0.path < $1.path }) {
@@ -64,14 +88,20 @@ public actor RunnerDiscovery {
             if fileManager.fileExists(atPath: descriptorURL.path) {
                 do {
                     let descriptor = try RunnerInstallationDescriptor.load(from: canonical)
-                    runners.append(try descriptor.installedRunner(in: canonical))
+                    var runner = try descriptor.installedRunner(in: canonical)
+                    if let system = systemServices[canonical] ?? systemServices[directory] {
+                        // Keep public registration metadata, but follow the live daemon's logs too.
+                        runner.serviceDomain = .system; runner.serviceLabel = system.serviceLabel
+                        runner.diagnosticURLs = Array(Set(runner.diagnosticURLs + system.diagnosticURLs)).sorted { $0.path < $1.path }
+                    }
+                    runners.append(runner)
                     resolved.insert(canonical.path)
                 } catch {
                     warnings.append("Could not read public runner metadata in \(directory.lastPathComponent): \(error.localizedDescription)")
                 }
                 continue
             }
-            if let service = forgejoServices[canonical] ?? forgejoServices[directory] {
+            if let service = systemServices[canonical] ?? systemServices[directory] ?? forgejoServices[canonical] ?? forgejoServices[directory] {
                 runners.append(service); resolved.insert(canonical.path); continue
             }
             // Forgejo's .runner contains persistent credentials. Classify native

@@ -15,7 +15,7 @@ final class ForgejoCoreTests: XCTestCase {
     func testOldInstalledRunnerDecodesWithGitHubDefaults() throws {
         let json = #"{"name":"mac-example","directory":"file:///synthetic/runner","labels":["ARM64"]}"#
         let runner = try JSONDecoder().decode(InstalledRunner.self, from: Data(json.utf8))
-        XCTAssertEqual(runner.provider, .github); XCTAssertEqual(runner.capacity, 1)
+        XCTAssertEqual(runner.provider, .github); XCTAssertEqual(runner.capacity, 1); XCTAssertEqual(runner.serviceDomain, .user)
         XCTAssertNil(runner.configurationURL); XCTAssertTrue(runner.diagnosticURLs.isEmpty)
         XCTAssertEqual(try JSONDecoder().decode(InstalledRunner.self, from: JSONEncoder().encode(runner)), runner)
     }
@@ -186,6 +186,77 @@ final class ForgejoCoreTests: XCTestCase {
         try PropertyListSerialization.data(fromPropertyList: object, format: .xml, options: 0).write(to: plist)
         let result = await RunnerDiscovery(homeDirectory: root).discover()
         XCTAssertTrue(result.runners.isEmpty, "A runner name or other flag value must never be mistaken for the daemon subcommand")
+    }
+
+    private func writeDaemon(_ name: String, in folder: URL, userName: String?, directory: URL) throws {
+        var object: [String: Any] = ["Label": "org.example." + name, "WorkingDirectory": directory.path, "KeepAlive": true,
+            "ProgramArguments": [directory.appendingPathComponent("bin/forgejo-runner").path, "daemon", "-c", directory.appendingPathComponent("config.yml").path],
+            "StandardErrorPath": directory.appendingPathComponent("logs/stderr.log").path]
+        if let userName { object["UserName"] = userName }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: object, format: .xml, options: 0).write(to: folder.appendingPathComponent("org.example.\(name).plist"))
+    }
+
+    func testSystemForgejoDaemonRunningAsThisUserIsDiscoveredForMonitoringOnly() async throws {
+        let directory = root.appendingPathComponent("forgejo-runner")
+        try write("binary placeholder", directory.appendingPathComponent("bin/forgejo-runner"))
+        try write("{private registration data}", directory.appendingPathComponent(".runner"))
+        try write("token: private-connection-configuration", directory.appendingPathComponent("config.yml"))
+        let daemons = root.appendingPathComponent("SystemDaemons")
+        try writeDaemon("mine", in: daemons, userName: "example-user", directory: directory)
+        try writeDaemon("other", in: daemons, userName: "someone-else", directory: root.appendingPathComponent("other-runner"))
+        try writeDaemon("root", in: daemons, userName: nil, directory: root.appendingPathComponent("root-runner"))
+        let result = await RunnerDiscovery(homeDirectory: root, systemDaemonsDirectory: daemons, userName: "example-user").discover()
+        XCTAssertEqual(result.runners.count, 1); XCTAssertTrue(result.warnings.isEmpty)
+        let runner = try XCTUnwrap(result.runners.first)
+        XCTAssertEqual(runner.serviceDomain, .system); XCTAssertEqual(runner.provider, .forgejo)
+        XCTAssertEqual(runner.serviceLabel, "org.example.mine"); XCTAssertEqual(runner.directory.path, directory.path)
+        XCTAssertEqual(runner.configurationURL?.path, directory.appendingPathComponent("config.yml").path)
+        XCTAssertEqual(runner.diagnosticURLs.map(\.lastPathComponent), ["stderr.log"])
+        // Without the explicit system folder, a synthetic home sees nothing outside itself.
+        let isolated = await RunnerDiscovery(homeDirectory: root, userName: "example-user").discover()
+        XCTAssertTrue(isolated.runners.isEmpty)
+    }
+
+    func testFolderUsedBySystemDaemonStaysMonitoringOnlyWithUserAgentOrDescriptor() async throws {
+        let daemons = root.appendingPathComponent("SystemDaemons")
+        let shared = root.appendingPathComponent("forgejo-runner")
+        try write("binary placeholder", shared.appendingPathComponent("bin/forgejo-runner"))
+        try writeDaemon("system", in: daemons, userName: "example-user", directory: shared)
+        try writeDaemon("agent", in: root.appendingPathComponent("Library/LaunchAgents"), userName: nil, directory: shared)
+        let managed = root.appendingPathComponent("managed-runner")
+        try FileManager.default.createDirectory(at: managed, withIntermediateDirectories: true)
+        try RunnerInstallationDescriptor(provider: .forgejo, name: "managed-example", serviceLabel: "io.github.l-k-m.RunningMan.forgejo.example",
+            executablePath: "bin/forgejo-runner", configurationPath: "config.yml", diagnosticPaths: ["_diag/runner.log"]).write(to: managed)
+        try writeDaemon("managed", in: daemons, userName: "example-user", directory: managed)
+        let result = await RunnerDiscovery(homeDirectory: root, systemDaemonsDirectory: daemons, userName: "example-user").discover()
+        let byPath = Dictionary(uniqueKeysWithValues: result.runners.map { ($0.directory.path, $0) })
+        XCTAssertEqual(result.runners.count, 2)
+        XCTAssertEqual(byPath[shared.path]?.serviceDomain, .system); XCTAssertEqual(byPath[shared.path]?.serviceLabel, "org.example.system")
+        XCTAssertEqual(byPath[managed.path]?.serviceDomain, .system); XCTAssertEqual(byPath[managed.path]?.serviceLabel, "org.example.managed")
+        XCTAssertEqual(byPath[managed.path]?.name, "managed-example")
+        XCTAssertEqual(byPath[managed.path]?.diagnosticURLs.map(\.path), [managed.appendingPathComponent("_diag/runner.log").path, managed.appendingPathComponent("logs/stderr.log").path])
+    }
+
+    func testServerCancellationAndFailureNoticesCompleteForgejoTasks() async throws {
+        let log = root.appendingPathComponent("logs/stderr.log")
+        try write("""
+        time="2026-10-12T08:11:50+02:00" level=info msg="task 3457 repo is example/project https://data.forgejo.test https://forge.example.test/"
+        time="2026-10-12T08:11:54+02:00" level=info msg="UpdateTask returned task result RESULT_CANCELLED for a task that was in local state RESULT_UNSPECIFIED - beginning local task termination" task_id=3457
+        time="2026-10-12T08:12:00+02:00" level=info msg="task 3458 repo is example/project https://data.forgejo.test https://forge.example.test/"
+        {"time":"2026-10-12T08:13:00+02:00","level":"info","msg":"UpdateTask returned task result RESULT_FAILURE for a task that was in local state RESULT_UNSPECIFIED - beginning local task termination","task_id":3458}
+        time="2026-10-12T08:14:00+02:00" level=info msg="task 3459 repo is example/project https://data.forgejo.test https://forge.example.test/"
+        time="2026-10-12T08:14:30+02:00" level=info msg="UpdateTask returned task result RESULT_CANCELLED for a task that was in local state RESULT_UNSPECIFIED - beginning local task termination"
+        time="2026-10-12T08:15:00+02:00" level=error msg="failed to fetch task" error="unavailable: 502 Bad Gateway"
+
+        """, log)
+        let runner = InstalledRunner(name: "native-example", directory: root, provider: .forgejo, diagnosticURLs: [log], serviceDomain: .system)
+        let jobs = await ForgejoLogMonitor().scan(runners: [runner]).jobs
+        let byName = Dictionary(uniqueKeysWithValues: jobs.map { ($0.name, $0) })
+        XCTAssertEqual(byName["Task 3457"]?.outcome, .cancelled); XCTAssertEqual(byName["Task 3457"]?.duration, 4)
+        XCTAssertEqual(byName["Task 3458"]?.outcome, .failure); XCTAssertEqual(byName["Task 3458"]?.duration, 60)
+        // A notice without a structured task ID never completes a task.
+        XCTAssertEqual(byName["Task 3459"]?.outcome, .unknown); XCTAssertNil(byName["Task 3459"]?.finishedAt)
     }
 
     func testDaemonCommandConsumesFlagValuesAndAcceptsBothConfigurationOrders() {

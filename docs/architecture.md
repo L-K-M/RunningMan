@@ -10,7 +10,7 @@ RunningMan has three Swift package targets:
 
 ## Discovery and live state
 
-Discovery is read-only and does not recursively crawl the user's home. It considers immediate child directories, RunningMan's managed installation root, explicitly imported directories and installation paths referenced by user LaunchAgents. Canonical paths deduplicate installations.
+Discovery is read-only and does not recursively crawl the user's home. It considers immediate child directories, RunningMan's managed installation root, explicitly imported directories, installation paths referenced by user LaunchAgents, and Forgejo daemons in system LaunchDaemons whose `UserName` is the current user. Canonical paths deduplicate installations. A folder used by a system service is monitored only, even if it also has a user LaunchAgent or a public descriptor, because stopping either could interrupt the system daemon. System scanning is opt-in at construction so tests with a synthetic home never see the machine's services.
 
 GitHub's runner metadata can have a UTF-8 byte-order mark. The service marker can contain an absolute plist path rather than a service label. Both are supported. The runner dependency manifest supplies its version without executing the binary.
 
@@ -23,6 +23,8 @@ The UI polls every three seconds while automatic refresh, a pending stop-after-j
 ## Independent service controls
 
 The service controller validates that a runner's service plist lives in the current user's LaunchAgents directory and points to that runner. It never uses sudo or broad process-name killing.
+
+System LaunchDaemon runners are observed, never controlled. Their state comes from unprivileged `launchctl print system/<label>` and `print-disabled system`; exit status 113 means not loaded. Every mutating operation refuses a system-domain runner before running any command.
 
 - Startup edits update RunAtLoad atomically without restarting a live service. Simple imported KeepAlive policies are backed up privately and disabled on disk when login startup is off; restoration checks the service identity and other settings. External edits win, and complex conditions are refused.
 - Start loads and kickstarts only the selected enabled service, without a kill/restart flag.

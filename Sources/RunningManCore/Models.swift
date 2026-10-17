@@ -5,6 +5,12 @@ public enum RunnerProvider: String, Codable, CaseIterable, Sendable {
     public var title: String { self == .github ? "GitHub" : "Forgejo" }
 }
 
+/// The launchd domain that owns a runner's service. RunningMan controls only
+/// per-user services; system LaunchDaemons are observed read-only.
+public enum RunnerServiceDomain: String, Codable, Sendable {
+    case user, system
+}
+
 public enum RunnerStatus: String, Codable, CaseIterable, Sendable {
     case idle, busy, stopped, disabled, attention, unknown
     public var title: String {
@@ -36,6 +42,7 @@ public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
     public var capacity: Int
     /// Public GitHub workFolder metadata; never inferred from Forgejo credentials.
     public var workDirectoryURL: URL?
+    public var serviceDomain: RunnerServiceDomain
     /// The existing storage name remains compatible with saved GitHub installations.
     public var remoteURL: URL? {
         get { githubURL }
@@ -50,17 +57,18 @@ public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
                 serviceLabel: String? = nil, version: String? = nil, labels: [String] = [],
                 provider: RunnerProvider = .github, executableURL: URL? = nil,
                 configurationURL: URL? = nil, diagnosticURLs: [URL] = [], capacity: Int = 1,
-                workDirectoryURL: URL? = nil) {
+                workDirectoryURL: URL? = nil, serviceDomain: RunnerServiceDomain = .user) {
         self.name = name; self.directory = directory; self.githubURL = githubURL
         self.agentID = agentID; self.serviceLabel = serviceLabel; self.version = version; self.labels = labels
         self.provider = provider; self.executableURL = executableURL; self.configurationURL = configurationURL
         self.diagnosticURLs = diagnosticURLs; self.capacity = max(1, min(capacity, 256))
         self.workDirectoryURL = workDirectoryURL
+        self.serviceDomain = serviceDomain
     }
 
     private enum CodingKeys: String, CodingKey {
         case name, directory, githubURL, agentID, serviceLabel, version, labels
-        case provider, executableURL, configurationURL, diagnosticURLs, capacity, workDirectoryURL
+        case provider, executableURL, configurationURL, diagnosticURLs, capacity, workDirectoryURL, serviceDomain
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -73,7 +81,8 @@ public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
             configurationURL: try values.decodeIfPresent(URL.self, forKey: .configurationURL),
             diagnosticURLs: try values.decodeIfPresent([URL].self, forKey: .diagnosticURLs) ?? [],
             capacity: try values.decodeIfPresent(Int.self, forKey: .capacity) ?? 1,
-            workDirectoryURL: try values.decodeIfPresent(URL.self, forKey: .workDirectoryURL))
+            workDirectoryURL: try values.decodeIfPresent(URL.self, forKey: .workDirectoryURL),
+            serviceDomain: try values.decodeIfPresent(RunnerServiceDomain.self, forKey: .serviceDomain) ?? .user)
     }
 }
 

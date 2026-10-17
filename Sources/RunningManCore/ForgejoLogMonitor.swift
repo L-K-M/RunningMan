@@ -19,6 +19,7 @@ public actor ForgejoLogMonitor {
     }()
     private let startPattern = try! NSRegularExpression(pattern: #"task ([0-9]+) repo is ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:\s|$)"#)
     private let receivedPattern = try! NSRegularExpression(pattern: #"received task ([0-9]+) of job (.+?), (?:be )?triggered by event:"#)
+    private let serverResultPattern = try! NSRegularExpression(pattern: #"UpdateTask returned task result (RESULT_[A-Z]+) for a task"#)
     public init() {}
 
     public func scan(runners: [InstalledRunner]) -> LogScanResult {
@@ -114,17 +115,32 @@ public actor ForgejoLogMonitor {
             var job = jobs[key] ?? RunnerJob(id: key, runnerID: runner.id, name: "Task \(values[0])", startedAt: date, outcome: .unknown)
             job.name = String(SecretRedactor.redact(values[1]).prefix(256)); jobs[key] = job
         }
+        // The Reporter logs at info level when the server cancels or fails a task;
+        // the job then terminates locally. A later trace jobResult line still wins.
+        if let values = captures(serverResultPattern, in: message), let rawID = fields["task_id"] {
+            switch values[0] {
+            case "RESULT_CANCELLED": complete(rawID, runner: runner, outcome: .cancelled, at: date)
+            case "RESULT_FAILURE": complete(rawID, runner: runner, outcome: .failure, at: date)
+            default: break
+            }
+        }
         // The official Reporter emits these structured fields only in trace logs.
         // A per-step result (stage=Main) must never complete the whole job.
         if let rawID = fields["task_id"], let result = fields["jobResult"] as? String, fields["stage"] as? String != "Main" {
-            let taskID = String(describing: rawID)
-            guard taskID.allSatisfy(\.isNumber), !taskID.isEmpty else { return }
-            let key = "\(runner.id)::forgejo-task-\(taskID)"
-            guard var job = jobs[key] else { return }
-            let outcome: JobOutcome
-            switch result { case "success": outcome = .success; case "failure": outcome = .failure; case "cancelled": outcome = .cancelled; default: return }
-            job.finishedAt = max(job.startedAt, date); job.outcome = outcome; jobs[key] = job
+            switch result {
+            case "success": complete(rawID, runner: runner, outcome: .success, at: date)
+            case "failure": complete(rawID, runner: runner, outcome: .failure, at: date)
+            case "cancelled": complete(rawID, runner: runner, outcome: .cancelled, at: date)
+            default: return
+            }
         }
+    }
+    private func complete(_ rawID: Any, runner: InstalledRunner, outcome: JobOutcome, at date: Date) {
+        let taskID = String(describing: rawID)
+        guard taskID.allSatisfy(\.isNumber), !taskID.isEmpty else { return }
+        let key = "\(runner.id)::forgejo-task-\(taskID)"
+        guard var job = jobs[key] else { return }
+        job.finishedAt = max(job.startedAt, date); job.outcome = outcome; jobs[key] = job
     }
     private func parseDate(_ text: String) -> Date? { fractionalFormatter.date(from: text) ?? dateFormatter.date(from: text) }
     private func captures(_ regex: NSRegularExpression, in text: String) -> [String]? {
