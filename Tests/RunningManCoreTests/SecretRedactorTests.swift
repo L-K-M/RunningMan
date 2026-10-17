@@ -156,6 +156,8 @@ final class SecretRedactorTests: XCTestCase {
             line(#""k":{"#, repeating: #""isSecret":true,"value":"#),
             line(repeating: #"{"isSecret":true,"value":"x"},"#),
             line("https://", repeating: "a:"),
+            // A JWT may not start inside a run its own segment can contain.
+            line(repeating: "eyJ-"),
             line(repeating: "a")
         ]
         for text in lines {

@@ -56,7 +56,9 @@ public enum SecretRedactor {
         Rule(#"\bxox[abposr]-[A-Za-z0-9-]{10,}"#, "[REDACTED]"),
         Rule(#"\bnpm_[A-Za-z0-9]{36}\b"#, "[REDACTED]"),
         Rule(#"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"#, "[REDACTED]"),
-        Rule(#"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"#, "[REDACTED]"),
+        // Starts only where a segment run begins: with \b, every "eyJ" after a '-' inside one
+        // run restarted the scan to the run's end, which is quadratic.
+        Rule(#"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"#, "[REDACTED]"),
     ]
     private static let rules: [Rule] = [
         Rule(#"(?s)-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----(?:.*?-----END (?:[A-Z ]*PRIVATE KEY)-----|.*$)"#, "[REDACTED PRIVATE KEY]"),
