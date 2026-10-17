@@ -143,30 +143,25 @@ struct RunnerWorkloadRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Button(snapshot.runner.name) {
-                        model.selectedRunnerID = snapshot.id
-                        model.section = .runners
-                    }.buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
-                    Text("\(snapshot.runner.provider.title) · \(snapshot.runner.capacity) \(snapshot.runner.capacity == 1 ? "slot" : "slots")")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }.frame(minWidth: 140, alignment: .leading)
-                Spacer(minLength: 8)
-                VStack(alignment: .trailing, spacing: 5) {
-                    Text(observed?.busyFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—")
-                        .font(.system(size: 21, weight: .semibold, design: .rounded)).monospacedDigit()
-                    Text("Busy while observed").font(.system(size: 9)).foregroundStyle(.secondary)
-                }.frame(width: 125, alignment: .trailing)
-                VStack(alignment: .trailing, spacing: 5) {
-                    Text("\(history.completedJobs)").font(.system(size: 18, weight: .semibold, design: .rounded))
-                    Text("Recorded jobs · 24h").font(.system(size: 9)).foregroundStyle(.secondary)
-                }.frame(width: 110, alignment: .trailing)
-                VStack(alignment: .trailing, spacing: 5) {
-                    Text(queue.map(String.init) ?? "—").font(.system(size: 18, weight: .semibold, design: .rounded))
-                        .foregroundStyle((queue ?? 0) > 0 ? Color.orange : .primary)
-                    Text("Compatible queue").font(.system(size: 9)).foregroundStyle(.secondary)
-                }.frame(width: 110, alignment: .trailing)
+            // The fixed stat columns need about 560 pt. A runner's detail pane
+            // can be narrower, so stack the stats under the name there instead
+            // of letting the row overflow and clip the whole detail view.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 16) {
+                    identity.frame(minWidth: 140, alignment: .leading)
+                    Spacer(minLength: 8)
+                    busyStat(.trailing).frame(width: 125, alignment: .trailing)
+                    jobsStat(.trailing).frame(width: 110, alignment: .trailing)
+                    queueStat(.trailing).frame(width: 110, alignment: .trailing)
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    identity
+                    HStack(alignment: .top, spacing: 12) {
+                        busyStat(.leading).frame(maxWidth: .infinity, alignment: .leading)
+                        jobsStat(.leading).frame(maxWidth: .infinity, alignment: .leading)
+                        queueStat(.leading).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
             }
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
@@ -180,6 +175,46 @@ struct RunnerWorkloadRow: View {
                 if let duration = history.medianDuration { Text("Median job \(formattedDuration(duration))") }
             }.font(.system(size: 9)).foregroundStyle(.secondary)
         }.padding(18)
+    }
+
+    private var identity: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Button(snapshot.runner.name) {
+                model.selectedRunnerID = snapshot.id
+                model.section = .runners
+            }.buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
+            Text("\(snapshot.runner.provider.title) · \(snapshot.runner.capacity) \(snapshot.runner.capacity == 1 ? "slot" : "slots")")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+        }
+    }
+
+    private func busyStat(_ alignment: HorizontalAlignment) -> some View {
+        stat("Busy while observed", alignment: alignment) {
+            Text(observed?.busyFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—")
+                .font(.system(size: 21, weight: .semibold, design: .rounded)).monospacedDigit()
+        }
+    }
+
+    private func jobsStat(_ alignment: HorizontalAlignment) -> some View {
+        stat("Recorded jobs · 24h", alignment: alignment) {
+            Text("\(history.completedJobs)").font(.system(size: 18, weight: .semibold, design: .rounded))
+        }
+    }
+
+    private func queueStat(_ alignment: HorizontalAlignment) -> some View {
+        stat("Compatible queue", alignment: alignment) {
+            Text(queue.map(String.init) ?? "—").font(.system(size: 18, weight: .semibold, design: .rounded))
+                .foregroundStyle((queue ?? 0) > 0 ? Color.orange : .primary)
+        }
+    }
+
+    /// Stats align trailing in the wide row and leading when they sit under
+    /// the runner name.
+    private func stat<Value: View>(_ title: String, alignment: HorizontalAlignment, @ViewBuilder value: () -> Value) -> some View {
+        VStack(alignment: alignment, spacing: 5) {
+            value()
+            Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
+        }
     }
 }
 
