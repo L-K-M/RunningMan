@@ -296,27 +296,64 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.runners.first { $0.id == forgejo.id }?.status, .busy)
     }
 
+    /// A restored request belongs to the run it was made for. A runner restarted while RunningMan
+    /// was closed (after a logout, a restart of the Mac or by hand) must not be stopped by it.
+    @MainActor func testRestoredStopAfterJobOnlyStopsTheProcessItWasMadeFor() {
+        let model = AppModel(demoMode: true)
+        let idle = model.runners.filter { $0.status == .idle && $0.processID != nil }
+        guard idle.count >= 3 else { return XCTFail("The demo needs three idle runners") }
+        let same = idle[0], restarted = idle[1], previousBoot = idle[2]
+        model.restoreDrainRequests([same.id: same.processID, restarted.id: 4_242, previousBoot.id: nil])
+        model.processDrainRequests()
+        XCTAssertEqual(model.runners.first { $0.id == same.id }?.status, .stopped)
+        for runner in [restarted, previousBoot] {
+            XCTAssertEqual(model.runners.first { $0.id == runner.id }?.status, .idle, runner.runner.name)
+            XCTAssertFalse(model.drainingRunnerIDs.contains(runner.id), runner.runner.name)
+            XCTAssertTrue(model.events.contains { $0.title == "Stop after job ended: \(runner.runner.name) restarted while RunningMan was closed" })
+        }
+    }
+
+    /// Without a process to compare, a restored request waits instead of stopping anything.
+    @MainActor func testRestoredStopAfterJobWaitsForAVisibleProcess() {
+        let model = AppModel(demoMode: true)
+        let index = model.runners.firstIndex { $0.status == .idle && $0.runner.provider == .github }!
+        let runner = model.runners[index]
+        model.restoreDrainRequests([runner.id: runner.processID])
+        model.runners[index].status = .unknown
+        model.runners[index].processID = nil
+        model.processDrainRequests()
+        XCTAssertTrue(model.drainingRunnerIDs.contains(runner.id))
+        model.runners[index].status = .idle
+        model.runners[index].processID = runner.processID
+        model.processDrainRequests()
+        XCTAssertEqual(model.runners[index].status, .stopped)
+    }
+
     func testDrainRequestStoreRoundTripsThroughSuite() throws {
         let suiteName = "RunningManTests.drain.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let ids: Set<String> = ["/synthetic/runners/alpha", "/synthetic/runners/beta"]
-        DrainRequestStore(defaults: defaults).save(ids)
-        XCTAssertEqual(DrainRequestStore(defaults: defaults).load(), ids)
-        DrainRequestStore(defaults: defaults).save([])
+        let requests: [String: Int32?] = ["/synthetic/runners/alpha": 8_040, "/synthetic/runners/beta": nil]
+        DrainRequestStore(defaults: defaults, bootTime: 100).save(requests)
+        XCTAssertEqual(DrainRequestStore(defaults: defaults, bootTime: 100).load(), requests)
+        // A process id names a run only within one boot.
+        XCTAssertEqual(DrainRequestStore(defaults: defaults, bootTime: 200).load(),
+                       ["/synthetic/runners/alpha": nil, "/synthetic/runners/beta": nil])
+        DrainRequestStore(defaults: defaults, bootTime: 100).save([:])
         XCTAssertNil(defaults.object(forKey: DrainRequestStore.key))
-        XCTAssertEqual(DrainRequestStore(defaults: defaults).load(), [])
-        defaults.set(["relative/path", "/synthetic/runners/gamma"], forKey: DrainRequestStore.key)
-        XCTAssertEqual(DrainRequestStore(defaults: defaults).load(), ["/synthetic/runners/gamma"])
+        XCTAssertEqual(DrainRequestStore(defaults: defaults, bootTime: 100).load(), [:])
+        defaults.set(["bootTime": 100.0, "processes": ["relative/path": 1, "/synthetic/runners/gamma": 2]], forKey: DrainRequestStore.key)
+        XCTAssertEqual(DrainRequestStore(defaults: defaults, bootTime: 100).load(), ["/synthetic/runners/gamma": 2])
+        XCTAssertNotNil(DrainRequestStore.currentBootTime())
     }
 
     @MainActor func testDemoStopAfterJobNeverWritesPreferencesOrAsksBeforeQuitting() {
-        let before = UserDefaults.standard.stringArray(forKey: DrainRequestStore.key)
+        let before = UserDefaults.standard.dictionary(forKey: DrainRequestStore.key) as NSDictionary?
         let model = AppModel(demoMode: true)
         let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
         model.perform(.drain, on: busy)
         XCTAssertTrue(model.drainingRunnerIDs.contains(busy.id))
-        XCTAssertEqual(UserDefaults.standard.stringArray(forKey: DrainRequestStore.key), before)
+        XCTAssertEqual(UserDefaults.standard.dictionary(forKey: DrainRequestStore.key) as NSDictionary?, before)
         XCTAssertNil(model.quitWarning)
     }
 
