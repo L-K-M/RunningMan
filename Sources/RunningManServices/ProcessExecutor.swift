@@ -163,7 +163,11 @@ private final class ProcessExecution: @unchecked Sendable {
         stopReason = reason
         guard launched else { return }
         // SIGTERM reaches the wrapper, whose trap stops the command's process group.
-        process.terminate()
+        // kill() instead of Process.terminate(): the process can exit after the check
+        // above, and terminate() raises for an exited process where kill() returns ESRCH.
+        kill(process.processIdentifier, SIGTERM)
+        // Backstop for a wrapper that does not exit. It reaches only the wrapper; the
+        // wrapper's trap already escalates to SIGKILL for the command's group.
         schedule(after: Self.terminationGrace) { [weak self] in
             guard let self, !exited, process.isRunning else { return }
             kill(process.processIdentifier, SIGKILL)

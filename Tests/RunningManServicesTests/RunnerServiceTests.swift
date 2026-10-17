@@ -325,7 +325,8 @@ final class InstallerSafetyTests: XCTestCase {
         let script = #"/bin/sleep 30 & printf '%s' "$!" > "$1"; echo done"#
         let start = Date()
         let result = try await SystemProcessExecutor().run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", script, "fixture", pidFile.path]))
-        if let pid = Int32((try? String(contentsOf: pidFile, encoding: .utf8)) ?? "") { kill(pid, SIGKILL) }
+        let pid = try XCTUnwrap(Int32(try String(contentsOf: pidFile, encoding: .utf8)))
+        kill(pid, SIGKILL)
         XCTAssertLessThan(Date().timeIntervalSince(start), 5)
         XCTAssertEqual(result.status, 0)
         XCTAssertFalse(result.timedOut)
