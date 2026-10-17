@@ -263,17 +263,87 @@ final class InstallerSafetyTests: XCTestCase {
         do { _ = try await checked(fake, ProcessRequest(executable: "/bin/false", arguments: ["test"], secrets: ["UNIQUE_TEMP_TOKEN"]), operation: "Test"); XCTFail("Expected failure") }
         catch { XCTAssertFalse(error.localizedDescription.contains("UNIQUE_TEMP_TOKEN")) }
     }
+    /// A shell that starts /bin/sleep 30 and writes "<shell PID> <sleep PID>" to $1.
+    /// The wrapper's job control makes the shell the leader of the command's own
+    /// process group, so the shell PID doubles as the group ID.
+    private static let groupFixture = #"/bin/sleep 30 & child=$!; printf '%s %s' "$$" "$child" > "$1"; wait "$child""#
+    private func fixturePIDs(_ url: URL) async throws -> (group: Int32, child: Int32) {
+        // Slow CI can take a while to start bash; poll instead of reading once.
+        let deadline = Date().addingTimeInterval(3)
+        while true {
+            let pids = ((try? String(contentsOf: url, encoding: .utf8)) ?? "").split(separator: " ").compactMap { Int32($0) }
+            if pids.count == 2 { return (pids[0], pids[1]) }
+            guard Date() < deadline else { throw RunnerServiceError("The fixture did not record its process IDs.") }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+    private func assertProcessGroupExits(_ pids: (group: Int32, child: Int32), file: StaticString = #filePath, line: UInt = #line) async throws {
+        let deadline = Date().addingTimeInterval(2)
+        while (kill(pids.child, 0) == 0 || kill(-pids.group, 0) == 0) && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertNotEqual(kill(pids.child, 0), 0, "The stopped shell’s child must not survive", file: file, line: line)
+        XCTAssertNotEqual(kill(-pids.group, 0), 0, "The command’s process group must be gone", file: file, line: line)
+    }
     func testTimeoutTerminatesOwnedChildProcessGroup() async throws {
         let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-child-pid-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: pidFile) }
-        let script = #"/bin/sleep 30 & child=$!; printf '%s' "$child" > "$1"; wait "$child""#
         let executor = SystemProcessExecutor()
-        let result = try await executor.run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", script, "fixture", pidFile.path], timeout: 0.2))
+        let result = try await executor.run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", Self.groupFixture, "fixture", pidFile.path], timeout: 2))
         XCTAssertTrue(result.timedOut)
-        let pid = try XCTUnwrap(Int32(String(contentsOf: pidFile, encoding: .utf8)))
-        let deadline = Date().addingTimeInterval(2)
-        while kill(pid, 0) == 0 && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
-        XCTAssertNotEqual(kill(pid, 0), 0, "The timed-out shell’s child must not survive")
+        try await assertProcessGroupExits(try await fixturePIDs(pidFile))
+    }
+    func testCancellationTerminatesOwnedChildProcessGroup() async throws {
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-child-pid-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let executor = SystemProcessExecutor()
+        let task = Task { try await executor.run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", Self.groupFixture, "fixture", pidFile.path], timeout: 10)) }
+        defer { task.cancel() }
+        let pids = try await fixturePIDs(pidFile)
+        XCTAssertEqual(getpgid(pids.child), pids.group)
+        let start = Date()
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Expected cancellation") } catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        try await assertProcessGroupExits(pids)
+    }
+    func testConcurrentRequestsDoNotQueueBehindEachOther() async throws {
+        // Blocking one cooperative thread per command would run these in batches
+        // of the processor count, taking at least three seconds.
+        let executor = SystemProcessExecutor()
+        let count = ProcessInfo.processInfo.activeProcessorCount * 3
+        let start = Date()
+        try await withThrowingTaskGroup(of: ProcessResult.self) { group in
+            for _ in 0..<count { group.addTask { try await executor.run(ProcessRequest(executable: "/bin/sleep", arguments: ["1"])) } }
+            for try await result in group { XCTAssertEqual(result.status, 0) }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.5)
+    }
+    func testSurvivingDescendantHoldingOutputDoesNotDelayResult() async throws {
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-child-pid-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        // The background sleep inherits both pipes and outlives the command.
+        let script = #"/bin/sleep 30 & printf '%s' "$!" > "$1"; echo done"#
+        let start = Date()
+        let result = try await SystemProcessExecutor().run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", script, "fixture", pidFile.path]))
+        if let pid = Int32((try? String(contentsOf: pidFile, encoding: .utf8)) ?? "") { kill(pid, SIGKILL) }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertFalse(result.timedOut)
+        XCTAssertEqual(result.output, "done\n")
+    }
+    func testCancelledTaskNeverLaunchesCommand() async throws {
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-marker-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await SystemProcessExecutor().run(ProcessRequest(executable: "/usr/bin/touch", arguments: [marker.path]))
+        }
+        do { _ = try await task.value; XCTFail("Expected cancellation") } catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+    func testLaunchFailureNamesTheCommand() async throws {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-missing-" + UUID().uuidString)
+        do { _ = try await SystemProcessExecutor().run(ProcessRequest(executable: "/usr/bin/true", directory: missing)); XCTFail("Expected a launch failure") }
+        catch { XCTAssertTrue(error.localizedDescription.hasPrefix("Could not launch true"), error.localizedDescription) }
     }
     func testExecutorTimesOutAndBoundsOutput() async throws {
         let executor = SystemProcessExecutor()
@@ -283,6 +353,7 @@ final class InstallerSafetyTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 3)
         let output = try await executor.run(ProcessRequest(executable: "/usr/bin/printf", arguments: [String(repeating: "a", count: 4096)], outputLimit: 100))
         XCTAssertEqual(output.output.count, 100)
+        XCTAssertTrue(output.truncated)
     }
 }
 
