@@ -5,7 +5,7 @@ import SwiftUI
 @main
 struct RunningManApp: App {
     @State private var model: AppModel
-    @State private var updates = AppUpdateChecker()
+    @State private var updates: AppUpdateChecker
     /// Follows the model from outside it, so frame ticks re-render only the menu bar label.
     @State private var menuBarAnimator: MenuBarAnimator
     @NSApplicationDelegateAdaptor(RunningManAppDelegate.self) private var delegate
@@ -14,16 +14,21 @@ struct RunningManApp: App {
         let model = AppModel()
         // Before SwiftUI creates a window, so AppKit has saved nothing yet.
         if model.demoMode { DemoLayoutPreferences.record() }
+        // Demo data and snapshot captures stay offline and banner-free.
+        let updates = AppUpdateChecker(mode: model.demoMode || SnapshotCapture.destination != nil ? .offline : .live)
         let animator = MenuBarAnimator(motion: SnapshotCapture.destination == nil ? .animated : .still)
         animator.follow(model)
         _model = State(initialValue: model)
+        _updates = State(initialValue: updates)
         _menuBarAnimator = State(initialValue: animator)
+        // The delegate starts both at launch, whether or not the main window appears.
+        delegate.model = model
+        delegate.updates = updates
     }
 
     var body: some Scene {
         Window("RunningMan", id: "main") {
-            MainWindowScene(updates: updates).environment(model)
-                .onAppear { delegate.model = model }
+            MainWindowScene(updates: updates, delegate: delegate).environment(model)
         }
         .defaultSize(width: 1280, height: 820)
         .commands {
@@ -51,7 +56,7 @@ struct RunningManApp: App {
         }
         Settings { SettingsView().environment(model).environment(updates).tint(RunningManStyle.accent) }
         MenuBarExtra {
-            RunnerMenuView().environment(model)
+            MenuPanelScene(delegate: delegate).environment(model)
         } label: {
             MenuBarLabel(animator: menuBarAnimator)
         }
@@ -63,28 +68,46 @@ private struct MainWindowScene: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
     let updates: AppUpdateChecker
+    let delegate: RunningManAppDelegate
     @State private var snapshotTaskStarted = false
     var body: some View {
         ContentView()
             .environment(updates)
             .background(WindowIdentity())
             .onAppear {
-                let action = openWindow
-                model.showMainWindow = {
-                    action(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
-                    NSApp.windows.first { $0.identifier?.rawValue == "RunningManMain" }?.makeKeyAndOrderFront(nil)
-                }
-                model.startMonitoring()
-                // Demo data and snapshot captures stay offline and banner-free.
-                if SnapshotCapture.destination == nil, !model.demoMode {
-                    updates.startAutomatic()
+                delegate.sceneAppeared(openWindow: openWindow)
+                // Occlusion notifications refine this; the first one can arrive
+                // before WindowIdentity has tagged the window, so read the window
+                // itself once it exists (a window restored minimised is not visible).
+                model.mainWindowVisible = true
+                DispatchQueue.main.async {
+                    if let window = NSApp.windows.first(where: { $0.identifier == RunningManAppDelegate.mainWindowIdentifier }) {
+                        model.mainWindowVisible = window.occlusionState.contains(.visible)
+                    }
                 }
                 if !snapshotTaskStarted, let directory = SnapshotCapture.destination {
                     snapshotTaskStarted = true
                     Task { await SnapshotCapture.run(model: model, directory: directory) }
                 }
             }
+            .onDisappear { model.mainWindowVisible = false }
+    }
+}
+
+/// The menu bar panel's content. It reports when the panel is open (polling
+/// cadence) and hands over openWindow, so alerts can reach the main window
+/// even when it never appeared at launch.
+private struct MenuPanelScene: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
+    let delegate: RunningManAppDelegate
+    var body: some View {
+        RunnerMenuView()
+            .onAppear {
+                delegate.sceneAppeared(openWindow: openWindow)
+                model.menuPanelVisible = true
+            }
+            .onDisappear { model.menuPanelVisible = false }
     }
 }
 
@@ -92,7 +115,7 @@ private struct WindowIdentity: NSViewRepresentable {
     final class View: NSView {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            window?.identifier = NSUserInterfaceItemIdentifier("RunningManMain")
+            window?.identifier = RunningManAppDelegate.mainWindowIdentifier
             if let window { DemoLayoutPreferences.windowDidAppear(window) }
         }
     }
@@ -141,7 +164,45 @@ private struct WindowIdentity: NSViewRepresentable {
 }
 
 @MainActor final class RunningManAppDelegate: NSObject, NSApplicationDelegate {
+    static let mainWindowIdentifier = NSUserInterfaceItemIdentifier("RunningManMain")
     weak var model: AppModel?
+    weak var updates: AppUpdateChecker?
+    /// From the latest scene to appear (main window or menu bar panel); it can
+    /// reopen the main window after it was closed.
+    private var openWindow: OpenWindowAction?
+
+    /// Monitoring and update checks start here rather than in the main window's
+    /// onAppear: the window is not always presented at launch (state restoration,
+    /// a bare launch argument), and the menu bar and stop-after-job need them anyway.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard let model else { return }
+        model.showMainWindow = { [weak self] in self?.showMainWindow() }
+        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.willCloseNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(windowVisibilityChanged(_:)), name: name, object: nil)
+        }
+        model.startMonitoring()
+        updates?.startAutomatic()
+    }
+
+    func sceneAppeared(openWindow: OpenWindowAction) {
+        self.openWindow = openWindow
+    }
+
+    /// Before any scene has handed over openWindow, this still brings an existing
+    /// main window forward.
+    func showMainWindow() {
+        openWindow?(id: "main")
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.windows.first { $0.identifier == Self.mainWindowIdentifier }?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Minimising, hiding the app, switching Spaces, covering the window or the
+    /// display sleeping all change occlusion; closing posts willClose first.
+    @objc private func windowVisibilityChanged(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window.identifier == Self.mainWindowIdentifier else { return }
+        model?.mainWindowVisible = notification.name != NSWindow.willCloseNotification && window.occlusionState.contains(.visible)
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) {
         model?.stopMonitoring()

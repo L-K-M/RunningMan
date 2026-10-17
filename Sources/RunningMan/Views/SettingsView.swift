@@ -6,12 +6,14 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppUpdateChecker.self) private var updates
     @AppStorage(AppUpdateChecker.automaticKey) private var checkAutomatically = true
+    /// The preview workspace never writes preferences, so its toggle changes only this copy.
+    @State private var previewChecksAutomatically = true
     var body: some View {
         @Bindable var model = model
         Form {
             Section {
                 Toggle("Refresh runner status automatically", isOn: $model.refreshAutomatically)
-                Text("Refreshes local service state and diagnostic logs every three seconds while RunningMan is open.")
+                Text("Refreshes local service state and diagnostic logs every 3 seconds while the RunningMan window or menu is open or a job is running, otherwise every 10 seconds while a runner is online and every minute while none is. Keeping this Mac awake and Low Power Mode adjust these intervals.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Toggle("Keep this Mac awake while a job is running", isOn: $model.keepAwakeWhileBusy)
                 Text("Prevents idle sleep during detected jobs. Closing your MacBook lid can still put it to sleep.")
@@ -61,7 +63,8 @@ struct SettingsView: View {
                 }
             } header: { Text("History & diagnostics") }
             Section {
-                Toggle("Check for updates automatically", isOn: $checkAutomatically)
+                Toggle("Check for updates automatically",
+                       isOn: updates.mode == .offline ? $previewChecksAutomatically : $checkAutomatically)
                 Text("Checks once a day by downloading a small public file from GitHub. Nothing else is sent.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 HStack {
