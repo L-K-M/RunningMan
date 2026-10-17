@@ -13,7 +13,7 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle("Refresh runner status automatically", isOn: $model.refreshAutomatically)
-                Text("Refreshes local service state and diagnostic logs every 3 seconds while the RunningMan window or menu is open or a job is running, every 10 seconds in the background and every minute while no runner is running. Low Power Mode refreshes less often.")
+                Text("Refreshes local service state and diagnostic logs every 3 seconds while the RunningMan window or menu is open or a job is running, otherwise every 10 seconds while a runner is online and every minute while none is. Keeping this Mac awake and Low Power Mode adjust these intervals.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Toggle("Keep this Mac awake while a job is running", isOn: $model.keepAwakeWhileBusy)
                 Text("Prevents idle sleep during detected jobs. Closing your MacBook lid can still put it to sleep.")
