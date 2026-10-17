@@ -187,7 +187,8 @@ final class ForgejoServiceTests: XCTestCase {
         let runner = try await create()
         await api.configure(failDelete: true)
         let controller = RunnerServiceController(homeDirectory: home, executor: executor, forgejoAPI: api)
-        do { try await controller.delete(runner); XCTFail("Expected remote delete refusal") } catch {}
+        do { try await controller.delete(runner); XCTFail("Expected remote delete refusal") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("The runner was stopped and remains stopped."), error.localizedDescription) }
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(RunnerInstallationDescriptor.fileName).path))
         let marker = try String(contentsOf: root.appendingPathComponent(".service"), encoding: .utf8)
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker))
@@ -261,6 +262,28 @@ final class ForgejoServiceTests: XCTestCase {
         XCTAssertEqual(RunnerProcesses("1551 1 /opt/example/bin/forgejo-runner daemon -c /opt/example/config.yml\n").pid(for: runner), 1551)
         XCTAssertEqual(RunnerProcesses("1552 1 /opt/example/bin/forgejo-runner daemon --config /opt/example/config.yml\n").pid(for: runner), 1552)
         XCTAssertNil(RunnerProcesses("1553 1 /opt/example/bin/forgejo-runner daemon -c /opt/example/other.yml\n").pid(for: runner))
+    }
+    func testDaemonWithEquivalentArgumentFormsIsRecognised() {
+        let runner = InstalledRunner(name: "example", directory: URL(fileURLWithPath: "/opt/example"), provider: .forgejo,
+            executableURL: URL(fileURLWithPath: "/opt/shared/bin/forgejo-runner"), configurationURL: URL(fileURLWithPath: "/opt/example/config.yml"))
+        XCTAssertEqual(RunnerProcesses("1561 1 /opt/shared/bin/forgejo-runner daemon --config=/opt/example/config.yml\n").pid(for: runner), 1561)
+        XCTAssertEqual(RunnerProcesses("1562 1 /opt/shared/bin/forgejo-runner --config /opt/example/config.yml daemon\n").pid(for: runner), 1562)
+        XCTAssertEqual(RunnerProcesses("1563 1 /opt/shared/bin/forgejo-runner daemon --config /opt/example/config.yml --label x\n").pid(for: runner), 1563)
+        XCTAssertEqual(RunnerProcesses("1564 1 /opt/shared/bin/forgejo-runner  daemon\t-c /opt/example/./config.yml\n").pid(for: runner), 1564)
+        XCTAssertNil(RunnerProcesses("1565 1 /opt/shared/bin/forgejo-runner register --config /opt/example/config.yml\n").pid(for: runner))
+        XCTAssertNil(RunnerProcesses("1566 1 /opt/other/bin/forgejo-runner daemon --config=/opt/example/config.yml\n").pid(for: runner))
+        XCTAssertNil(RunnerProcesses("1567 1 /opt/shared/bin/forgejo-runner daemon --config=/opt/example/config.yml --unknown\n").pid(for: runner))
+        // A shared executable gives no evidence of the daemon's working directory.
+        XCTAssertNil(RunnerProcesses("1568 1 /opt/shared/bin/forgejo-runner daemon -c config.yml\n").pid(for: runner))
+    }
+    /// ps shows no working directory, so a relative configuration cannot tell this runner's daemon
+    /// from another daemon started elsewhere with the same executable; stopping must not signal it.
+    func testDaemonWithRelativeConfigurationIsNeverMatched() {
+        let runner = InstalledRunner(name: "example", directory: URL(fileURLWithPath: "/opt/example"), provider: .forgejo,
+            executableURL: URL(fileURLWithPath: "/opt/example/forgejo-runner"), configurationURL: URL(fileURLWithPath: "/opt/example/config.yml"))
+        XCTAssertNil(RunnerProcesses("1571 1 /opt/example/forgejo-runner --config=config.yml daemon\n").pid(for: runner))
+        XCTAssertNil(RunnerProcesses("1572 1 /opt/example/forgejo-runner daemon -c other.yml\n").pid(for: runner))
+        XCTAssertEqual(RunnerProcesses("1573 1 /opt/example/forgejo-runner daemon --config=/opt/example/config.yml\n").pid(for: runner), 1573)
     }
     private func importedFixture(arguments: [String]? = nil, workingDirectory: Bool = true, keepAlive: Any? = nil) throws -> (InstalledRunner, URL) {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -337,6 +360,15 @@ final class ForgejoServiceTests: XCTestCase {
         do { try await controller.delete(runner, force: true); XCTFail("Expected missing API metadata refusal") }
         catch { XCTAssertTrue(error.localizedDescription.contains("registration ID")) }
         XCTAssertEqual(before, try Data(contentsOf: plist))
+        let commands = await executor.recorded()
+        XCTAssertTrue(commands.isEmpty)
+    }
+    func testImportedServiceWithMissingPlistReportsMissingFile() async throws {
+        let (runner, plist) = try importedFixture()
+        try FileManager.default.removeItem(at: plist)
+        let controller = RunnerServiceController(homeDirectory: home, executor: executor, forgejoAPI: api)
+        do { try await controller.setStartsAtLogin(false, for: runner); XCTFail("Expected missing service refusal") }
+        catch { XCTAssertEqual(error.localizedDescription, "The login service file referenced by this runner is missing.") }
         let commands = await executor.recorded()
         XCTAssertTrue(commands.isEmpty)
     }

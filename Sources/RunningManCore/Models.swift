@@ -26,6 +26,30 @@ public enum RunnerStatus: String, Codable, CaseIterable, Sendable {
     public var isRunning: Bool { self == .idle || self == .busy }
 }
 
+/// The Runners list's status segments. Online covers every started service,
+/// idle or busy; Busy narrows that to runners currently running a job.
+public enum RunnerStatusFilter: String, CaseIterable, Sendable {
+    case all, busy, online, stopped, attention
+    public var title: String {
+        switch self {
+        case .all: return "All"
+        case .busy: return "Busy"
+        case .online: return "Online"
+        case .stopped: return "Stopped"
+        case .attention: return "Attention"
+        }
+    }
+    public func matches(_ status: RunnerStatus) -> Bool {
+        switch self {
+        case .all: return true
+        case .busy: return status == .busy
+        case .online: return status.isRunning
+        case .stopped: return status == .stopped || status == .disabled
+        case .attention: return status == .attention || status == .unknown
+        }
+    }
+}
+
 public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
     public var id: String { directory.standardizedFileURL.path }
     public var name: String
@@ -89,6 +113,11 @@ public struct InstalledRunner: Identifiable, Codable, Hashable, Sendable {
 public enum JobOutcome: String, Codable, CaseIterable, Sendable {
     case running, success, failure, cancelled, unknown
     public var title: String { rawValue.capitalized }
+    /// A value this build does not know (for example history written by a newer build)
+    /// reads as unknown instead of failing the whole record. Encoding is unchanged.
+    public init(from decoder: Decoder) throws {
+        self = JobOutcome(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
 }
 
 public struct RunnerJob: Identifiable, Codable, Hashable, Sendable {
@@ -156,7 +185,10 @@ public struct LogScanResult: Sendable {
     public var events: [ActivityEvent]
     public var warnings: [String]
     public var tails: [String: String]
-    public init(jobs: [RunnerJob] = [], events: [ActivityEvent] = [], warnings: [String] = [], tails: [String: String] = [:]) {
-        self.jobs = jobs; self.events = events; self.warnings = warnings; self.tails = tails
+    /// The most recent job's steps and output per runner ID; GitHub runners only.
+    public var stepLogs: [String: JobStepLog]
+    public init(jobs: [RunnerJob] = [], events: [ActivityEvent] = [], warnings: [String] = [], tails: [String: String] = [:],
+                stepLogs: [String: JobStepLog] = [:]) {
+        self.jobs = jobs; self.events = events; self.warnings = warnings; self.tails = tails; self.stepLogs = stepLogs
     }
 }

@@ -29,19 +29,19 @@ struct ContentView: View {
             .navigationTitle(model.section.title)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    if model.isRefreshing {
-                        ProgressView().controlSize(.small).frame(width: 22).help("Refreshing runner state")
-                    } else {
-                        Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                            .help("Refresh runner state (⌘R)").keyboardShortcut("r")
-                    }
+                    // Always the same button, so the toolbar never changes width or flickers;
+                    // background polls do not show progress here.
+                    Button { Task { await model.refreshNow() } } label: { RefreshSymbol(isActive: model.isManualRefreshing) }
+                        .disabled(model.isManualRefreshing)
+                        .help(model.isManualRefreshing ? "Refreshing runner state" : "Refresh runner state (⌘R)").keyboardShortcut("r")
                     Menu {
                         Button("Import existing runner…", systemImage: "folder.badge.plus") { model.importRunner() }
                         Button("Export diagnostics…", systemImage: "square.and.arrow.up") { model.exportDiagnostics() }
                         Divider()
                         Button("Start all enabled runners", systemImage: "play.fill") { model.startAll() }
                         Button("Stop all when idle", systemImage: "moon.zzz") { model.stopAllWhenIdle() }
-                    } label: { Image(systemName: "ellipsis.circle") }.help("Fleet actions")
+                    } label: { Label("Fleet actions", systemImage: "ellipsis") }
+                        .menuIndicator(.hidden).tint(.primary).help("Fleet actions")
                     Button { model.showingNewRunner = true } label: { Label("New runner", systemImage: "plus") }
                         .keyboardShortcut("n").help("Register a new GitHub or Forgejo runner (⌘N)")
                 }
@@ -51,8 +51,9 @@ struct ContentView: View {
         }
         .tint(RunningManStyle.accent)
         .frame(minWidth: 1000, minHeight: 650)
-        .sheet(isPresented: $model.showingNewRunner) { NewRunnerSheet().environment(model) }
-        .sheet(isPresented: $model.showingForgejoConnection) { ForgejoConnectionSheet().environment(model) }
+        // A sheet does not inherit the tint above, so each presented root sets its own.
+        .sheet(isPresented: $model.showingNewRunner) { NewRunnerSheet().environment(model).tint(RunningManStyle.accent) }
+        .sheet(isPresented: $model.showingForgejoConnection) { ForgejoConnectionSheet().environment(model).tint(RunningManStyle.accent) }
         .onChange(of: model.selectedRunnerID) { _, _ in model.selectionChanged() }
         .alert("RunningMan", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
@@ -65,17 +66,14 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 11) {
+            HStack(spacing: 10) {
                 Image(systemName: "figure.run.circle.fill")
-                    .font(.system(size: 34)).symbolRenderingMode(.palette)
+                    .font(.system(size: 30)).symbolRenderingMode(.palette)
                     .foregroundStyle(.white, RunningManStyle.accent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("RunningMan").font(.system(size: 16, weight: .bold, design: .rounded))
-                    Text("YOUR LOCAL RUNNER HQ").font(.system(size: 8, weight: .semibold)).tracking(1.05).foregroundStyle(.secondary)
-                }
-            }.padding(.horizontal, 17).padding(.top, 22).padding(.bottom, 28)
+                Text("RunningMan").font(.system(size: 16, weight: .bold, design: .rounded))
+            }.padding(.horizontal, 17).padding(.top, 22).padding(.bottom, 26)
 
-            Text("WORKSPACE").font(.system(size: 9, weight: .semibold)).tracking(1.3).foregroundStyle(.tertiary)
+            Text("WORKSPACE").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(.secondary)
                 .padding(.horizontal, 20).padding(.bottom, 9)
             ForEach(AppSection.allCases) { section in
                 Button {
@@ -90,7 +88,7 @@ struct ContentView: View {
                             Text("\(model.runners.count)").font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         }
-                    }.foregroundStyle(model.section == section ? RunningManStyle.accent : Color.primary.opacity(0.8))
+                    }.foregroundStyle(model.section == section ? RunningManStyle.accentText : Color.primary.opacity(0.8))
                         .padding(.horizontal, 11).padding(.vertical, 10)
                         .background(model.section == section ? RunningManStyle.accent.opacity(0.11) : .clear, in: RoundedRectangle(cornerRadius: 8))
                         .contentShape(Rectangle())
@@ -99,16 +97,16 @@ struct ContentView: View {
             }
             Spacer()
             if model.demoMode {
-                Label("Preview workspace", systemImage: "sparkles").font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.indigo).padding(10)
+                Label("Preview workspace", systemImage: "sparkles").font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(RunningManStyle.accentText).padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.indigo.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    .background(RunningManStyle.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                     .padding(.horizontal, 12).padding(.bottom, 12)
             }
             VStack(alignment: .leading, spacing: 11) {
                 HStack(spacing: 7) {
-                    Circle().fill(model.runningCount > 0 ? RunningManStyle.teal : Color.secondary).frame(width: 6, height: 6)
-                    Text("\(model.runningCount) of \(model.runners.count) running").font(.system(size: 11, weight: .medium))
+                    Circle().fill(model.runningCount > 0 ? StatusTone.positive.fill : StatusTone.neutral.fill).frame(width: 6, height: 6)
+                    Text("\(model.runningCount) of \(model.runners.count) online").font(.system(size: 11, weight: .medium))
                 }
                 if let lastUpdated = model.lastUpdated {
                     Text("Checked \(lastUpdated.formatted(date: .omitted, time: .shortened))")
@@ -120,7 +118,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(model.githubAccount ?? "GitHub CLI").font(.system(size: 11, weight: .medium)).lineLimit(1)
                             .help("Check your GitHub CLI account in Settings")
-                        Text("This Mac · \(model.demoMode ? "demo" : ProcessInfo.processInfo.userName)").font(.system(size: 9)).foregroundStyle(.secondary)
+                        Text("This Mac · \(model.demoMode ? "demo" : ProcessInfo.processInfo.userName)").font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
                     SettingsLink { Image(systemName: "gearshape").foregroundStyle(.secondary) }
@@ -128,5 +126,19 @@ struct ContentView: View {
                 }
             }.padding(16)
         }.frame(maxHeight: .infinity).background(.thinMaterial)
+    }
+}
+
+/// Spins while a manual refresh runs on macOS 15 and later, unless Reduce Motion is on.
+/// On macOS 14 the disabled button alone shows that a refresh is in progress.
+private struct RefreshSymbol: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let isActive: Bool
+    var body: some View {
+        if #available(macOS 15, *) {
+            Image(systemName: "arrow.clockwise").symbolEffect(.rotate, isActive: isActive && !reduceMotion)
+        } else {
+            Image(systemName: "arrow.clockwise")
+        }
     }
 }

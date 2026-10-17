@@ -46,13 +46,18 @@ public actor RunnerActivityStore {
                 if elapsed > 0 && elapsed <= 15 {
                     append(Segment(runnerID: id, start: previous.date, end: date, busy: previous.busy && busy))
                 } else if elapsed <= 0 { continue }
+            } else if let end = storage.segments.lazy.filter({ $0.runnerID == id }).map(\.end).max(), date < end {
+                // The clock moved back since this runner was last observed. Wait until it passes
+                // the saved coverage instead of starting an interval that overlaps it.
+                continue
             }
             storage.samples[id] = Sample(date: date, busy: busy)
         }
         prune(before: cutoff)
         // Observations are kept live in memory; disk checkpoints are bounded to
         // once per 30 seconds. A crash may lose the most recent checkpoint window.
-        if persistedAt == nil || date.timeIntervalSince(persistedAt!) >= 30 {
+        // A checkpoint dated in the future (the clock moved back) is due immediately.
+        if persistedAt.map({ $0 > date || date.timeIntervalSince($0) >= 30 }) ?? true {
             try persist(at: date)
         }
     }
@@ -87,7 +92,6 @@ public actor RunnerActivityStore {
     private func load() throws {
         guard !loaded else { return }
         guard FileManager.default.fileExists(atPath: fileURL.path) else { loaded = true; return }
-        let data = try RunnerDiscovery.smallData(at: fileURL, limit: 5 * 1024 * 1024)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let value = try decoder.singleValueContainer()
@@ -99,18 +103,31 @@ public actor RunnerActivityStore {
             }
             return date
         }
-        let value = try decoder.decode(Storage.self, from: data)
-        guard value.schemaVersion == 1, value.samples.count <= 256, value.segments.count <= 5000 else {
-            throw ActivityError.invalid
+        guard let data = try SavedStoreFile.contents(of: fileURL, limit: 5 * 1024 * 1024),
+              let value = try? decoder.decode(Storage.self, from: data),
+              value.schemaVersion == 1, value.samples.count <= 256, value.segments.count <= 5000 else {
+            // Observed activity is a best-effort estimate: keep the unusable file for
+            // inspection and start over rather than failing every refresh.
+            _ = try SavedStoreFile.moveAside(fileURL)
+            loaded = true
+            return
         }
-        // Refuse corrupt/overlapping intervals instead of inflating coverage.
-        var previous: [String: Date] = [:]
-        for segment in value.segments.sorted(by: { $0.start < $1.start }) {
-            guard segment.start < segment.end, segment.runnerID.utf8.count <= 4096,
-                  previous[segment.runnerID].map({ $0 <= segment.start }) ?? true else { throw ActivityError.invalid }
-            previous[segment.runnerID] = segment.end
+        // Older builds and clock corrections can leave overlapping intervals. Start each one no
+        // earlier than the previous end for its runner so overlap is never counted twice, and
+        // drop what becomes empty. A sample older than that end would overlap again; drop it too.
+        var ends: [String: Date] = [:]
+        var segments: [Segment] = []
+        // Ties break on end and busy, so the surviving interval never depends on sort stability.
+        let ordered = value.segments.sorted { ($0.start, $0.end, $0.busy ? 1 : 0) < ($1.start, $1.end, $1.busy ? 1 : 0) }
+        for var segment in ordered where segment.runnerID.utf8.count <= 4096 {
+            if let end = ends[segment.runnerID] { segment.start = max(segment.start, end) }
+            guard segment.start < segment.end else { continue }
+            segments.append(segment)
+            ends[segment.runnerID] = segment.end
         }
-        storage = value; loaded = true
+        storage = Storage(samples: value.samples.filter { sample in ends[sample.key].map { sample.value.date >= $0 } ?? true },
+                          segments: segments.sorted { $0.end < $1.end })
+        loaded = true
         persistedAt = value.samples.values.map(\.date).max()
     }
     private func persist(at date: Date) throws {
@@ -128,6 +145,6 @@ public actor RunnerActivityStore {
     }
     private enum ActivityError: LocalizedError {
         case invalid
-        var errorDescription: String? { "Saved runner activity has invalid or overlapping observations." }
+        var errorDescription: String? { "Runner activity is too large to save." }
     }
 }
