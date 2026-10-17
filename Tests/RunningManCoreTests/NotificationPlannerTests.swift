@@ -18,11 +18,13 @@ final class NotificationPlannerTests: XCTestCase {
     private func plan(previousJobs: [RunnerJob] = [], currentJobs: [RunnerJob] = [],
                       previousRunners: [RunnerSnapshot] = [], currentRunners: [RunnerSnapshot] = [],
                       actions: [String: Date] = [:], notified: Set<String> = [],
-                      preferences: NotificationPreferences? = nil, now: TimeInterval = 300) -> [PlannedNotification] {
+                      preferences: NotificationPreferences? = nil, lastStops: [String: Date] = [:],
+                      now: TimeInterval = 300) -> [PlannedNotification] {
         NotificationPlanner.plan(previousJobs: previousJobs, currentJobs: currentJobs,
                                  previousRunners: previousRunners, currentRunners: currentRunners,
                                  recentUserActions: actions, monitoringStartedAt: launch, alreadyNotified: notified,
-                                 preferences: preferences ?? all, now: launch.addingTimeInterval(now))
+                                 preferences: preferences ?? all, lastStopNotifications: lastStops,
+                                 now: launch.addingTimeInterval(now))
     }
 
     func testHistoricalJobsReparsedAtLaunchNeverNotify() {
@@ -130,6 +132,16 @@ final class NotificationPlannerTests: XCTestCase {
         XCTAssertEqual(plan(previousRunners: [snapshot(.unknown, pid: 44)], currentRunners: [snapshot(.stopped)]).count, 1)
         XCTAssertTrue(plan(previousRunners: [snapshot(.idle, pid: 42)], currentRunners: [snapshot(.stopped)],
                            preferences: NotificationPreferences(jobFailures: true)).isEmpty)
+    }
+
+    /// A daemon that launchd keeps restarting while it fails gets a new process each time.
+    func testRepeatedStopsOfOneRunnerWaitBeforeNotifyingAgain() {
+        let lastStop = [runner.id: launch.addingTimeInterval(300 - 60)]
+        XCTAssertTrue(plan(previousRunners: [snapshot(.idle, pid: 43)], currentRunners: [snapshot(.stopped)],
+                           lastStops: lastStop).isEmpty)
+        let expired = [runner.id: launch.addingTimeInterval(300 - NotificationPlanner.stopRenotifyInterval)]
+        XCTAssertEqual(plan(previousRunners: [snapshot(.idle, pid: 44)], currentRunners: [snapshot(.stopped)],
+                            lastStops: expired).count, 1)
     }
 
     func testUnknownTransitionsDoNotNotify() {

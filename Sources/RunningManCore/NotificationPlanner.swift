@@ -37,17 +37,20 @@ public enum NotificationPlanner {
     /// Completions older than this are stale. Together with the monitoring start date this
     /// keeps relaunch reparses and replays after clearing saved history quiet.
     static let maximumJobAge: TimeInterval = 15 * 60
+    /// A runner that keeps failing right after launchd restarts it would otherwise post a banner
+    /// for every restart; after one stop notification, further ones wait this long.
+    public static let stopRenotifyInterval: TimeInterval = 10 * 60
 
     public static func plan(previousJobs: [RunnerJob], currentJobs: [RunnerJob],
                             previousRunners: [RunnerSnapshot], currentRunners: [RunnerSnapshot],
                             recentUserActions: [String: Date], monitoringStartedAt: Date,
                             alreadyNotified: Set<String>, preferences: NotificationPreferences,
-                            now: Date) -> [PlannedNotification] {
+                            lastStopNotifications: [String: Date] = [:], now: Date) -> [PlannedNotification] {
         guard preferences.isAnyEnabled else { return [] }
         let planned = jobNotifications(previous: previousJobs, current: currentJobs, runners: previousRunners + currentRunners,
                                        monitoringStartedAt: monitoringStartedAt, preferences: preferences, now: now)
-            + runnerNotifications(previous: previousRunners, current: currentRunners,
-                                  recentUserActions: recentUserActions, preferences: preferences, now: now)
+            + runnerNotifications(previous: previousRunners, current: currentRunners, recentUserActions: recentUserActions,
+                                  lastStopNotifications: lastStopNotifications, preferences: preferences, now: now)
         var seen = alreadyNotified
         return planned.filter { seen.insert($0.id).inserted }
     }
@@ -83,8 +86,8 @@ public enum NotificationPlanner {
     }
 
     private static func runnerNotifications(previous: [RunnerSnapshot], current: [RunnerSnapshot],
-                                            recentUserActions: [String: Date], preferences: NotificationPreferences,
-                                            now: Date) -> [PlannedNotification] {
+                                            recentUserActions: [String: Date], lastStopNotifications: [String: Date],
+                                            preferences: NotificationPreferences, now: Date) -> [PlannedNotification] {
         guard preferences.unexpectedStops else { return [] }
         let before = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return current.compactMap { snapshot in
@@ -93,6 +96,7 @@ public enum NotificationPlanner {
             guard snapshot.status == .stopped || snapshot.status == .disabled,
                   let old = before[snapshot.id], old.status.isRunning || old.processID != nil else { return nil }
             if let acted = recentUserActions[snapshot.id], now.timeIntervalSince(acted) < userActionGrace { return nil }
+            if let last = lastStopNotifications[snapshot.id], now.timeIntervalSince(last) < stopRenotifyInterval { return nil }
             // The previous process identifies this stop, so a later crash after a restart is new.
             let instance = old.processID.map(String.init) ?? "t\(Int(now.timeIntervalSince1970))"
             let job = old.status == .busy ? old.currentJob?.name : nil

@@ -110,6 +110,8 @@ final class AppModel {
     @ObservationIgnored private var recentUserActions: [String: Date] = [:]
     @ObservationIgnored private var notifiedKeys: Set<String> = []
     @ObservationIgnored private var notifiedKeyOrder: [String] = []
+    /// When each runner last notified about a stop, so a restart loop does not post a banner every cycle.
+    @ObservationIgnored private var lastStopNotifications: [String: Date] = [:]
     @ObservationIgnored var showMainWindow: (() -> Void)?
 
     static var supportDirectory: URL {
@@ -714,8 +716,10 @@ final class AppModel {
         let planned = NotificationPlanner.plan(previousJobs: previousJobs, currentJobs: jobs,
             previousRunners: previousRunners, currentRunners: runners, recentUserActions: actions,
             monitoringStartedAt: monitoringStartedAt, alreadyNotified: notifiedKeys,
-            preferences: notificationPreferences, now: now)
+            preferences: notificationPreferences, lastStopNotifications: lastStopNotifications, now: now)
         guard !planned.isEmpty else { return }
+        lastStopNotifications = lastStopNotifications.filter { now.timeIntervalSince($0.value) < NotificationPlanner.stopRenotifyInterval }
+        for item in planned where item.kind == .runnerStopped { lastStopNotifications[item.runnerID] = now }
         notifiedKeys.formUnion(planned.map(\.id))
         notifiedKeyOrder += planned.map(\.id)
         if notifiedKeyOrder.count > 1_000 {
