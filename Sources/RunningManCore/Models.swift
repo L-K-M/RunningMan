@@ -156,7 +156,10 @@ public struct LogScanResult: Sendable {
     public var events: [ActivityEvent]
     public var warnings: [String]
     public var tails: [String: String]
-    public init(jobs: [RunnerJob] = [], events: [ActivityEvent] = [], warnings: [String] = [], tails: [String: String] = [:]) {
-        self.jobs = jobs; self.events = events; self.warnings = warnings; self.tails = tails
+    /// The most recent job's steps and output per runner ID; GitHub runners only.
+    public var stepLogs: [String: JobStepLog]
+    public init(jobs: [RunnerJob] = [], events: [ActivityEvent] = [], warnings: [String] = [], tails: [String: String] = [:],
+                stepLogs: [String: JobStepLog] = [:]) {
+        self.jobs = jobs; self.events = events; self.warnings = warnings; self.tails = tails; self.stepLogs = stepLogs
     }
 }
