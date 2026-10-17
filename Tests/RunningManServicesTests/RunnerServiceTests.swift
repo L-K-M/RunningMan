@@ -9,12 +9,17 @@ actor FakeExecutor: ProcessExecuting {
     var disabled = ""
     var failures: [String: ProcessResult] = [:]
     var installWhenRequested = false
-    func configure(processes: String = "", services: String = "", disabled: String = "", failures: [String: ProcessResult] = [:], installWhenRequested: Bool = false) {
+    var processesAfterKill: String?
+    var processesAfterDisable: String?
+    func configure(processes: String = "", services: String = "", disabled: String = "", failures: [String: ProcessResult] = [:], installWhenRequested: Bool = false, processesAfterKill: String? = nil, processesAfterDisable: String? = nil) {
         self.processes = processes; self.services = services; self.disabled = disabled; self.failures = failures; self.installWhenRequested = installWhenRequested
+        self.processesAfterKill = processesAfterKill; self.processesAfterDisable = processesAfterDisable
     }
     func recorded() -> [ProcessRequest] { requests }
     func run(_ request: ProcessRequest) async throws -> ProcessResult {
         requests.append(request)
+        if request.executable == "/bin/kill", let processesAfterKill { processes = processesAfterKill }
+        if request.arguments.first == "disable", let processesAfterDisable { processes = processesAfterDisable }
         let key = request.arguments.joined(separator: " ")
         if let result = failures[key] { return result }
         if installWhenRequested, request.arguments.last == "install", let root = request.directory {
@@ -89,6 +94,156 @@ final class RunnerServiceTests: XCTestCase {
         do { try await controller.setEnabled(false, for: runner); XCTFail("Expected refusal") } catch {}
         let commands = await fake.recorded()
         XCTAssertEqual(commands.count, 3)
+    }
+    func testDisableAppliesOverrideBeforeStoppingAndRechecksIdle() async throws {
+        let fake = FakeExecutor()
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.setEnabled(false, for: runner)
+        let commands = await fake.recorded()
+        let disable = try XCTUnwrap(commands.firstIndex { $0.arguments.first == "disable" })
+        let bootout = try XCTUnwrap(commands.firstIndex { $0.arguments.first == "bootout" })
+        XCTAssertLessThan(disable, bootout, "The disable override must be written even if stopping fails")
+        let checks = commands.indices.filter { commands[$0].arguments.first == "list" }
+        XCTAssertEqual(checks.count, 2, "Busy state is checked before disabling and again before stopping")
+        XCTAssertTrue(checks.contains { $0 > disable && $0 < bootout })
+        XCTAssertTrue(try readStartup())
+    }
+    func testDisableNeverStopsAJobThatStartedAfterTheFirstCheck() async throws {
+        let fake = FakeExecutor()
+        let busy = "100 1 \(runner.directory.path)/bin/Runner.Listener run\n101 100 \(runner.directory.path)/bin/Runner.Worker spawnclient 1 2\n"
+        await fake.configure(processesAfterDisable: busy)
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        do { try await controller.setEnabled(false, for: runner); XCTFail("Expected the busy runner to stay running") }
+        catch { XCTAssertTrue(error.localizedDescription.hasPrefix("Disabled, but stopping failed:"), error.localizedDescription) }
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.contains { $0.arguments.first == "disable" })
+        XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" || $0.executable == "/bin/kill" })
+    }
+    func testDisableReportsStopFailureAfterDisabling() async throws {
+        let fake = FakeExecutor()
+        await fake.configure(failures: ["bootout gui/\(getuid())/\(label)": ProcessResult(status: 5, output: "", error: "Input/output error")])
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        do { try await controller.setEnabled(false, for: runner); XCTFail("Expected partial failure") }
+        catch { XCTAssertTrue(error.localizedDescription.hasPrefix("Disabled, but stopping failed:"), error.localizedDescription) }
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.contains { $0.arguments == ["disable", "gui/\(getuid())/\(label)"] })
+    }
+    func testStopRefusesWhenServiceLoadStateCannotBeRead() async throws {
+        let listener = "777 1 \(runner.directory.path)/bin/Runner.Listener run --startuptype service\n"
+        for failure in [ProcessResult(status: 1, output: "", error: "Input/output error"), ProcessResult(status: 113, output: "", error: "", timedOut: true),
+                        ProcessResult(status: 0, output: "", error: "", truncated: true)] {
+            let fake = FakeExecutor()
+            await fake.configure(processes: listener, failures: ["print gui/\(getuid())/\(label)": failure])
+            let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+            do { try await controller.stop(runner); XCTFail("Expected unverifiable load state to refuse") }
+            catch { XCTAssertTrue(error.localizedDescription.contains("Cannot verify whether the runner service is loaded"), error.localizedDescription) }
+            let commands = await fake.recorded()
+            XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" || $0.executable == "/bin/kill" })
+        }
+    }
+    func testStopTreatsServiceNotFoundAsUnloaded() async throws {
+        let fake = FakeExecutor()
+        await fake.configure(failures: ["print gui/\(getuid())/\(label)": ProcessResult(status: 113, output: "", error: "Could not find service")])
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.stop(runner)
+        let commands = await fake.recorded()
+        XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" })
+    }
+    func testStopToleratesListenerThatExitsBeforeKill() async throws {
+        let fake = FakeExecutor()
+        await fake.configure(processes: "777 1 \(runner.directory.path)/bin/Runner.Listener run\n",
+                             failures: ["-TERM 777": ProcessResult(status: 1, output: "", error: "kill: 777: No such process")], processesAfterKill: "")
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.stop(runner)
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.contains { $0.executable == "/bin/kill" })
+    }
+    func testStopReportsListenerThatKeepsRunning() async throws {
+        let fake = FakeExecutor()
+        await fake.configure(processes: "777 1 \(runner.directory.path)/bin/Runner.Listener run\n")
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake, stopExitTimeout: 0.5)
+        do { try await controller.stop(runner); XCTFail("A listener that survives stopping must not be reported as stopped") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("still running"), error.localizedDescription) }
+    }
+    func testStaleServiceMarkerIsReplacedWhenStarting() async throws {
+        try FileManager.default.removeItem(at: plist)
+        let fake = FakeExecutor()
+        await fake.configure(installWhenRequested: true)
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        let snapshots = await controller.snapshots(for: [runner])
+        XCTAssertEqual(snapshots.first?.status, .stopped)
+        try await controller.start(runner)
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.contains { $0.arguments.last == "install" })
+        XCTAssertTrue(commands.contains { $0.arguments.first == "kickstart" })
+        XCTAssertEqual(try runnerText(runner.directory.appendingPathComponent(".service")), plist.path)
+        XCTAssertFalse(try readStartup(), "A reinstalled service must not opt into login startup")
+    }
+    func testStaleServiceMarkerDoesNotBlockStop() async throws {
+        try FileManager.default.removeItem(at: plist)
+        let fake = FakeExecutor()
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.stop(runner)
+        let commands = await fake.recorded()
+        XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" }, "launchd does not report the deleted plist, so nothing is unloaded")
+    }
+    func testStaleServiceMarkerRefusesWhenLoadStateCannotBeRead() async throws {
+        try FileManager.default.removeItem(at: plist)
+        let listener = "777 1 \(runner.directory.path)/bin/Runner.Listener run --startuptype service\n"
+        let fake = FakeExecutor()
+        await fake.configure(processes: listener, failures: ["print gui/\(getuid())/\(label)": ProcessResult(status: 5, output: "", error: "Input/output error")])
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        do { try await controller.stop(runner); XCTFail("Expected a refusal") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Cannot verify whether the runner service is loaded"), error.localizedDescription) }
+        let commands = await fake.recorded()
+        XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" || $0.executable == "/bin/kill" })
+    }
+    func testFailedSignalIsAnErrorOnlyWhileTheProcessRemains() async throws {
+        let listener = "777 1 \(runner.directory.path)/bin/Runner.Listener run --startuptype service\n"
+        let denied = ProcessResult(status: 1, output: "", error: "kill: 777: Operation not permitted")
+        let gone = FakeExecutor()
+        await gone.configure(processes: listener, failures: ["-TERM 777": denied], processesAfterKill: "")
+        try await RunnerServiceController(homeDirectory: home, executor: gone).stop(runner)
+        let stays = FakeExecutor()
+        await stays.configure(processes: listener, failures: ["-TERM 777": denied])
+        do { try await RunnerServiceController(homeDirectory: home, executor: stays).stop(runner); XCTFail("Expected the signal failure") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Stop manually started runner failed"), error.localizedDescription) }
+    }
+    func testStaleServiceMarkerStillUnloadsTheServiceLoadedFromIt() async throws {
+        try FileManager.default.removeItem(at: plist)
+        let target = "gui/\(getuid())/\(label)"
+        for (path, unloads) in [(plist.path, true), ("/Users/someone/Library/LaunchAgents/\(label).plist", false)] {
+            let fake = FakeExecutor()
+            await fake.configure(failures: ["print \(target)": ProcessResult(status: 0, output: "\(target) = {\n\tpath = \(path)\n\tstate = running\n}\n", error: "")])
+            let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+            try await controller.stop(runner)
+            let commands = await fake.recorded()
+            XCTAssertEqual(commands.contains { $0.arguments == ["bootout", target] }, unloads, path)
+        }
+    }
+    func testExistingServicePlistWithoutMarkerIsAdoptedInsteadOfReinstalled() async throws {
+        try FileManager.default.removeItem(at: runner.directory.appendingPathComponent(".service"))
+        let fake = FakeExecutor()
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        try await controller.setEnabled(true, for: runner)
+        let commands = await fake.recorded()
+        XCTAssertFalse(commands.contains { $0.arguments.last == "install" || $0.arguments.first?.hasSuffix("/env.sh") == true })
+        XCTAssertEqual(commands.map(\.arguments), [["enable", "gui/\(getuid())/\(label)"]])
+        XCTAssertEqual(try runnerText(runner.directory.appendingPathComponent(".service")), plist.path)
+        XCTAssertTrue(try readStartup(), "Adopting an existing service preserves its startup policy")
+    }
+    func testForeignServicePlistWithoutMarkerIsNotAdopted() async throws {
+        try FileManager.default.removeItem(at: runner.directory.appendingPathComponent(".service"))
+        try writePlist(startup: true, root: home.appendingPathComponent("unrelated").path)
+        let before = try Data(contentsOf: plist)
+        let fake = FakeExecutor()
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        do { try await controller.setEnabled(true, for: runner); XCTFail("Expected mismatch refusal") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("does not match"), error.localizedDescription) }
+        XCTAssertEqual(before, try Data(contentsOf: plist))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: runner.directory.appendingPathComponent(".service").path))
+        let commands = await fake.recorded()
+        XCTAssertTrue(commands.isEmpty)
     }
     func testStopPreservesStartupAndEnablement() async throws {
         let fake = FakeExecutor()
@@ -169,7 +324,10 @@ final class RunnerServiceTests: XCTestCase {
         await fake.configure(failures: [remove: ProcessResult(status: 1, output: "", error: "Authentication TEMPORARY_REMOVAL_TOKEN failed")])
         let controller = RunnerServiceController(homeDirectory: home, executor: fake)
         do { try await controller.delete(runner, trashFiles: true); XCTFail("Expected unregister failure") }
-        catch { XCTAssertFalse(error.localizedDescription.contains("TEMPORARY_REMOVAL_TOKEN")) }
+        catch {
+            XCTAssertFalse(error.localizedDescription.contains("TEMPORARY_REMOVAL_TOKEN"))
+            XCTAssertTrue(error.localizedDescription.contains("The runner was stopped and remains stopped."), error.localizedDescription)
+        }
         XCTAssertTrue(FileManager.default.fileExists(atPath: runner.directory.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: plist.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: runner.directory.appendingPathComponent(".service").path))
@@ -263,17 +421,93 @@ final class InstallerSafetyTests: XCTestCase {
         do { _ = try await checked(fake, ProcessRequest(executable: "/bin/false", arguments: ["test"], secrets: ["UNIQUE_TEMP_TOKEN"]), operation: "Test"); XCTFail("Expected failure") }
         catch { XCTAssertFalse(error.localizedDescription.contains("UNIQUE_TEMP_TOKEN")) }
     }
+    /// A shell that starts /bin/sleep 30 and writes "<shell PID> <sleep PID>" to $1.
+    /// The wrapper's job control makes the shell the leader of the command's own
+    /// process group, so the shell PID doubles as the group ID.
+    private static let groupFixture = #"/bin/sleep 30 & child=$!; printf '%s %s' "$$" "$child" > "$1"; wait "$child""#
+    private func fixturePIDs(_ url: URL) async throws -> (group: Int32, child: Int32) {
+        // Slow CI can take a while to start bash; poll instead of reading once.
+        let deadline = Date().addingTimeInterval(3)
+        while true {
+            let pids = ((try? String(contentsOf: url, encoding: .utf8)) ?? "").split(separator: " ").compactMap { Int32($0) }
+            if pids.count == 2 { return (pids[0], pids[1]) }
+            guard Date() < deadline else { throw RunnerServiceError("The fixture did not record its process IDs.") }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+    private func assertProcessGroupExits(_ pids: (group: Int32, child: Int32), file: StaticString = #filePath, line: UInt = #line) async throws {
+        let deadline = Date().addingTimeInterval(2)
+        while (kill(pids.child, 0) == 0 || kill(-pids.group, 0) == 0) && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertNotEqual(kill(pids.child, 0), 0, "The stopped shell’s child must not survive", file: file, line: line)
+        XCTAssertNotEqual(kill(-pids.group, 0), 0, "The command’s process group must be gone", file: file, line: line)
+    }
     func testTimeoutTerminatesOwnedChildProcessGroup() async throws {
         let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-child-pid-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: pidFile) }
-        let script = #"/bin/sleep 30 & child=$!; printf '%s' "$child" > "$1"; wait "$child""#
         let executor = SystemProcessExecutor()
-        let result = try await executor.run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", script, "fixture", pidFile.path], timeout: 0.2))
+        let result = try await executor.run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", Self.groupFixture, "fixture", pidFile.path], timeout: 2))
         XCTAssertTrue(result.timedOut)
-        let pid = try XCTUnwrap(Int32(String(contentsOf: pidFile, encoding: .utf8)))
-        let deadline = Date().addingTimeInterval(2)
-        while kill(pid, 0) == 0 && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
-        XCTAssertNotEqual(kill(pid, 0), 0, "The timed-out shell’s child must not survive")
+        try await assertProcessGroupExits(try await fixturePIDs(pidFile))
+    }
+    func testCancellationTerminatesOwnedChildProcessGroup() async throws {
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-child-pid-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let executor = SystemProcessExecutor()
+        let task = Task { try await executor.run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", Self.groupFixture, "fixture", pidFile.path], timeout: 10)) }
+        defer { task.cancel() }
+        let pids = try await fixturePIDs(pidFile)
+        XCTAssertEqual(getpgid(pids.child), pids.group)
+        let start = Date()
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Expected cancellation") } catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        try await assertProcessGroupExits(pids)
+    }
+    func testConcurrentRequestsDoNotQueueBehindEachOther() async throws {
+        // Blocking one cooperative thread per command would run these in batches
+        // of the processor count, taking at least three seconds. The bound leaves
+        // headroom for slow process spawning on loaded CI machines.
+        let executor = SystemProcessExecutor()
+        let count = ProcessInfo.processInfo.activeProcessorCount * 3
+        let start = Date()
+        try await withThrowingTaskGroup(of: ProcessResult.self) { group in
+            for _ in 0..<count { group.addTask { try await executor.run(ProcessRequest(executable: "/bin/sleep", arguments: ["1"])) } }
+            for try await result in group { XCTAssertEqual(result.status, 0) }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.9)
+    }
+    func testSurvivingDescendantHoldingOutputDoesNotDelayResult() async throws {
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-child-pid-" + UUID().uuidString)
+        // Also runs when the command throws, so the background sleep never outlives the test.
+        defer {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8), let pid = Int32(text) { kill(pid, SIGKILL) }
+            try? FileManager.default.removeItem(at: pidFile)
+        }
+        // The background sleep inherits both pipes and outlives the command.
+        let script = #"/bin/sleep 30 & printf '%s' "$!" > "$1"; echo done"#
+        let start = Date()
+        let result = try await SystemProcessExecutor().run(ProcessRequest(executable: "/bin/bash", arguments: ["-c", script, "fixture", pidFile.path]))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertFalse(result.timedOut)
+        XCTAssertEqual(result.output, "done\n")
+    }
+    func testCancelledTaskNeverLaunchesCommand() async throws {
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-marker-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: marker) }
+        // withTaskCancellationHandler runs onCancel immediately for an already
+        // cancelled task, so the executor learns about it before launching.
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await SystemProcessExecutor().run(ProcessRequest(executable: "/usr/bin/touch", arguments: [marker.path]))
+        }
+        do { _ = try await task.value; XCTFail("Expected cancellation") } catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+    func testLaunchFailureNamesTheCommand() async throws {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-missing-" + UUID().uuidString)
+        do { _ = try await SystemProcessExecutor().run(ProcessRequest(executable: "/usr/bin/true", directory: missing)); XCTFail("Expected a launch failure") }
+        catch { XCTAssertTrue(error.localizedDescription.hasPrefix("Could not launch true"), error.localizedDescription) }
     }
     func testExecutorTimesOutAndBoundsOutput() async throws {
         let executor = SystemProcessExecutor()
@@ -283,14 +517,26 @@ final class InstallerSafetyTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 3)
         let output = try await executor.run(ProcessRequest(executable: "/usr/bin/printf", arguments: [String(repeating: "a", count: 4096)], outputLimit: 100))
         XCTAssertEqual(output.output.count, 100)
+        XCTAssertTrue(output.truncated)
     }
+}
+
+private final class ProgressMessages: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+    func append(_ message: String) { lock.withLock { messages.append(message) } }
+    var all: [String] { lock.withLock { messages } }
 }
 
 private actor InstallerExecutor: ProcessExecuting {
     let home: URL
     let failRegistration: Bool
+    /// Leaves a folder where the label sidecar goes, so writing it fails after registration.
+    let blockLabelSidecar: Bool
     var requests: [ProcessRequest] = []
-    init(home: URL, failRegistration: Bool = false) { self.home = home; self.failRegistration = failRegistration }
+    init(home: URL, failRegistration: Bool = false, blockLabelSidecar: Bool = false) {
+        self.home = home; self.failRegistration = failRegistration; self.blockLabelSidecar = blockLabelSidecar
+    }
     func recorded() -> [ProcessRequest] { requests }
     func run(_ request: ProcessRequest) async throws -> ProcessResult {
         requests.append(request)
@@ -321,6 +567,9 @@ private actor InstallerExecutor: ProcessExecuting {
             let name = arguments[arguments.firstIndex(of: "--name")! + 1]
             let object: [String: Any] = ["agentName": name, "agentId": 42, "gitHubUrl": "https://github.com/example/project"]
             try JSONSerialization.data(withJSONObject: object).write(to: request.directory!.appendingPathComponent(".runner"))
+            if blockLabelSidecar {
+                try FileManager.default.createDirectory(at: request.directory!.appendingPathComponent(GitHubLabelSidecar.fileName), withIntermediateDirectories: true)
+            }
         }
         if arguments.last == "install", arguments.first?.hasSuffix("/svc.sh") == true {
             let root = request.directory!
@@ -355,6 +604,41 @@ final class InstallerFlowTests: XCTestCase {
         XCTAssertTrue(commands.contains { $0.arguments.first == "kickstart" })
         XCTAssertFalse(commands.contains { $0.arguments.joined().contains("EPHEMERAL_REG_TOKEN") })
         XCTAssertEqual(commands.filter { $0.environment["ACTIONS_RUNNER_INPUT_TOKEN"] != nil }.count, 1)
+        // GitHub's .runner has no labels, so the labels typed at creation must survive discovery.
+        let sidecar = root.appendingPathComponent(GitHubLabelSidecar.fileName).path
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: sidecar)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let discovered = await RunnerDiscovery(homeDirectory: home).discover(additionalDirectories: [root])
+        XCTAssertEqual(discovered.runners.first { $0.directory.path == root.path }?.labels, ["local-mac-release"])
+    }
+    func testLabelsThatCannotBeRecordedAreRefusedBeforeRegistration() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-installer-tests-" + UUID().uuidString).resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let executor = InstallerExecutor(home: home)
+        // Each label passes the per-label rules, but together they exceed the sidecar's size.
+        let labels = (0..<100).map { String(format: "%03d", $0) + String(repeating: "x", count: 253) }
+        do {
+            _ = try await GitHubRunnerInstaller(homeDirectory: home, executor: executor).create(CreateRunnerRequest(
+                githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: labels, directory: home.appendingPathComponent("created"))) { _ in }
+            XCTFail("Expected the label set to be refused")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("16 KB"), error.localizedDescription) }
+        let commands = await executor.recorded()
+        XCTAssertTrue(commands.isEmpty, "Nothing is downloaded or registered for labels that could not be recorded")
+        XCTAssertTrue(GitHubLabelSidecar.isValid(Array(labels.prefix(40))))
+    }
+    func testFailedLabelSidecarWriteDoesNotAbandonSetup() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-installer-tests-" + UUID().uuidString).resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let executor = InstallerExecutor(home: home, blockLabelSidecar: true)
+        let messages = ProgressMessages()
+        let runner = try await GitHubRunnerInstaller(homeDirectory: home, executor: executor).create(CreateRunnerRequest(
+            githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: ["local-mac-release"],
+            directory: home.appendingPathComponent("created"), startsAtLogin: false, startImmediately: false)) { messages.append($0) }
+        XCTAssertEqual(runner.agentID, 42)
+        XCTAssertTrue(messages.all.contains { $0.contains("could not be saved locally") }, "\(messages.all)")
+        let commands = await executor.recorded()
+        XCTAssertTrue(commands.contains { $0.arguments.last == "install" }, "The login service is still installed")
     }
     func testRegistrationFailurePreservesPartialInstallationAndRedactsToken() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-installer-tests-" + UUID().uuidString).resolvingSymlinksInPath()
@@ -364,12 +648,14 @@ final class InstallerFlowTests: XCTestCase {
         let installer = GitHubRunnerInstaller(homeDirectory: home, executor: executor)
         let root = home.appendingPathComponent("created")
         do {
-            _ = try await installer.create(CreateRunnerRequest(githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: [], directory: root)) { _ in }
+            _ = try await installer.create(CreateRunnerRequest(githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: ["local-mac-release"], directory: root)) { _ in }
             XCTFail("Expected registration failure")
         } catch {
             XCTAssertFalse(error.localizedDescription.contains("EPHEMERAL_REG_TOKEN"))
             XCTAssertTrue(error.localizedDescription.contains("preserved"))
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("config.sh").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(GitHubLabelSidecar.fileName).path),
+                       "Labels are recorded only after GitHub accepted the registration")
     }
 }

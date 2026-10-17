@@ -1,81 +1,42 @@
 import SwiftUI
 import RunningManCore
 
-enum RunningManStyle {
-    static let accent = Color.indigo
-    static let teal = Color(red: 0.10, green: 0.57, blue: 0.56)
-    static let canvas = Color(nsColor: .windowBackgroundColor)
-    static let surface = Color(nsColor: .controlBackgroundColor)
-    static let line = Color.primary.opacity(0.07)
-}
-
-extension RunnerStatus {
-    var color: Color {
-        switch self {
-        case .idle: return RunningManStyle.teal
-        case .busy: return .indigo
-        case .stopped: return .secondary
-        case .disabled: return .secondary
-        case .attention: return .orange
-        case .unknown: return .secondary
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .idle: return "checkmark.circle.fill"
-        case .busy: return "arrow.triangle.2.circlepath"
-        case .stopped: return "stop.circle"
-        case .disabled: return "pause.circle"
-        case .attention: return "exclamationmark.triangle.fill"
-        case .unknown: return "questionmark.circle"
-        }
-    }
-}
-
-extension JobOutcome {
-    var color: Color {
-        switch self {
-        case .running: return .indigo
-        case .success: return RunningManStyle.teal
-        case .failure: return .red
-        case .cancelled: return .orange
-        case .unknown: return .secondary
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .running: return "arrow.triangle.2.circlepath"
-        case .success: return "checkmark.circle.fill"
-        case .failure: return "xmark.circle.fill"
-        case .cancelled: return "minus.circle.fill"
-        case .unknown: return "questionmark.circle"
-        }
-    }
-}
-
 struct StatusBadge: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let status: RunnerStatus
     var compact = false
     var body: some View {
         Label(status.title, systemImage: status.symbol)
             .font(.system(size: compact ? 10 : 11, weight: .semibold))
             .foregroundStyle(status.color)
+            .contentTransition(.symbolEffect(.replace))
+            .busySymbolEffect(status == .busy)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(status.color.opacity(0.10), in: Capsule())
+            .background {
+                // Disabled reads as hollow, so it differs from stopped at a glance.
+                if status == .disabled {
+                    Capsule().strokeBorder(status.tone.fill.opacity(0.45))
+                } else {
+                    Capsule().fill(status.tone.fill.opacity(StatusTone.tintOpacity))
+                }
+            }
+            .animation(reduceMotion ? nil : .snappy, value: status)
             .accessibilityLabel("Status: \(status.title)")
     }
 }
 
 struct OutcomeBadge: View {
     let outcome: JobOutcome
+    var compact = false
     var body: some View {
         Label(outcome.title, systemImage: outcome.symbol)
-            .font(.system(size: 11, weight: .medium))
+            .font(.system(size: compact ? 10 : 11, weight: compact ? .semibold : .medium))
             .foregroundStyle(outcome.color)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(outcome.color.opacity(0.09), in: Capsule())
+            .padding(.horizontal, compact ? 6 : 8)
+            .padding(.vertical, compact ? 3 : 5)
+            .background(outcome.tone.fill.opacity(StatusTone.tintOpacity), in: Capsule())
+            .accessibilityLabel("Outcome: \(outcome.title)")
     }
 }
 
@@ -91,22 +52,7 @@ struct Surface<Content: View>: View {
         }
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RunningManStyle.surface, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(RunningManStyle.line))
-    }
-}
-
-struct PageHeading: View {
-    let eyebrow: String
-    let title: String
-    let subtitle: String
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(eyebrow.uppercased()).font(.system(size: 10, weight: .bold, design: .rounded))
-                .tracking(1.8).foregroundStyle(RunningManStyle.accent)
-            Text(title).font(.system(size: 30, weight: .bold, design: .rounded)).tracking(-0.7)
-            Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
-        }
+            .cardStyle()
     }
 }
 
@@ -176,10 +122,14 @@ struct RunnerActionsMenu: View {
     }
 }
 
+/// "45s", "3m", "3m 4s", "2h", "2h 5m": zero trailing components are omitted.
 func formattedDuration(_ interval: TimeInterval) -> String {
     let seconds = max(0, Int(interval))
-    if seconds >= 3600 { return "\(seconds / 3600)h \((seconds % 3600) / 60)m" }
-    if seconds >= 60 { return "\(seconds / 60)m \(seconds % 60)s" }
+    if seconds >= 3600 {
+        let minutes = (seconds % 3600) / 60
+        return minutes == 0 ? "\(seconds / 3600)h" : "\(seconds / 3600)h \(minutes)m"
+    }
+    if seconds >= 60 { return seconds % 60 == 0 ? "\(seconds / 60)m" : "\(seconds / 60)m \(seconds % 60)s" }
     return "\(seconds)s"
 }
 
@@ -188,16 +138,51 @@ func formattedDuration(for job: RunnerJob) -> String {
     return formattedDuration(job.duration)
 }
 
+/// Minute-granular relative time ("now", "5 min. ago"). Render it inside a
+/// `TimelineView(.everyMinute)` instead of a relative text style that updates every
+/// second, and pass the current date: the schedule's context date is the start of the
+/// minute, up to 59 seconds behind on the first render.
+@MainActor enum RelativeTime {
+    private static let formatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.dateTimeStyle = .named
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+
+    static func text(for date: Date, now: Date) -> String {
+        let minutes = max(0, (now.timeIntervalSince(date) / 60).rounded(.down))
+        return formatter.localizedString(fromTimeInterval: -minutes * 60)
+    }
+}
+
 struct JobRow: View {
+    /// History rows are grouped by day, so they show the start time; other lists
+    /// show how long ago the job started, relative to a minute-granular `now`.
+    enum Timestamp {
+        case startTime
+        case relative(now: Date)
+    }
+
     @Environment(AppModel.self) private var model
     let job: RunnerJob
     var showRunner = false
+    /// Adds a badge after the name for every outcome except success, so failures,
+    /// cancellations and unknown results stand out in long lists.
+    var showsOutcomeBadge = false
+    let timestamp: Timestamp
     var body: some View {
         HStack(spacing: 13) {
             Image(systemName: job.outcome.symbol).font(.system(size: 16)).foregroundStyle(job.outcome.color)
+                .busySymbolEffect(job.outcome == .running)
                 .frame(width: 22)
+                .help(job.outcome.title)
+                .accessibilityLabel("Outcome: \(job.outcome.title)")
             VStack(alignment: .leading, spacing: 5) {
-                Text(job.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                HStack(spacing: 7) {
+                    Text(job.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    if showsOutcomeBadge && job.outcome != .success { OutcomeBadge(outcome: job.outcome, compact: true) }
+                }
                 HStack(spacing: 5) {
                     if let repository = job.repository { Text(repository).lineLimit(1) }
                     if let workflow = job.workflow {
@@ -205,16 +190,27 @@ struct JobRow: View {
                         Text(workflow).lineLimit(1)
                     }
                     if job.repository == nil && job.workflow == nil { Text("Recorded from local runner logs") }
-                }.font(.system(size: 10)).foregroundStyle(.secondary)
-                if showRunner, let runner = model.runners.first(where: { $0.id == job.runnerID }) {
-                    Text(runner.runner.name).font(.system(size: 10)).foregroundStyle(.tertiary)
+                }.font(.system(size: 11)).foregroundStyle(.secondary)
+                if showRunner, let name = model.runnerNames[job.runnerID] {
+                    Text(name).font(.system(size: 10)).foregroundStyle(.secondary)
                 }
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 5) {
-                Text(formattedDuration(for: job)).font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .help(job.outcome != .running && job.finishedAt == nil ? "No completion result in local logs" : "Recorded job duration")
-                Text(job.startedAt, style: .relative).font(.system(size: 10)).foregroundStyle(.secondary)
+                Group {
+                    if job.outcome == .running {
+                        Text(job.startedAt, style: .timer).help("Time since the job started")
+                    } else {
+                        Text(formattedDuration(for: job))
+                            .help(job.finishedAt == nil ? "No completion result in local logs" : "Recorded job duration")
+                    }
+                }.font(.system(size: 11, weight: .medium, design: .monospaced))
+                Group {
+                    switch timestamp {
+                    case .startTime: Text(job.startedAt.formatted(date: .omitted, time: .shortened))
+                    case .relative(let now): Text(RelativeTime.text(for: job.startedAt, now: now))
+                    }
+                }.font(.system(size: 10)).foregroundStyle(.secondary)
             }
             if job.runURL != nil {
                 Button { model.openJob(job) } label: { Image(systemName: "arrow.up.right") }
