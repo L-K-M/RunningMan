@@ -117,7 +117,9 @@ public actor RunnerActivityStore {
         // drop what becomes empty. A sample older than that end would overlap again; drop it too.
         var ends: [String: Date] = [:]
         var segments: [Segment] = []
-        for var segment in value.segments.sorted(by: { $0.start < $1.start }) where segment.runnerID.utf8.count <= 4096 {
+        // Ties break on end and busy, so the surviving interval never depends on sort stability.
+        let ordered = value.segments.sorted { ($0.start, $0.end, $0.busy ? 1 : 0) < ($1.start, $1.end, $1.busy ? 1 : 0) }
+        for var segment in ordered where segment.runnerID.utf8.count <= 4096 {
             if let end = ends[segment.runnerID] { segment.start = max(segment.start, end) }
             guard segment.start < segment.end else { continue }
             segments.append(segment)

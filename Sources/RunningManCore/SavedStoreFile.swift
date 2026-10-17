@@ -34,10 +34,13 @@ enum SavedStoreFile {
         let directory = url.deletingLastPathComponent()
         let base = "\(url.deletingPathExtension().lastPathComponent).invalid-\(formatter.string(from: date))"
         // A second recovery within the same second gets a numeric suffix; earlier copies are never replaced.
-        var candidate = directory.appendingPathComponent(base).appendingPathExtension(url.pathExtension)
+        let named = { (name: String) in
+            url.pathExtension.isEmpty ? directory.appendingPathComponent(name) : directory.appendingPathComponent(name).appendingPathExtension(url.pathExtension)
+        }
+        var candidate = named(base)
         var suffix = 2
         while FileManager.default.fileExists(atPath: candidate.path) {
-            candidate = directory.appendingPathComponent("\(base)-\(suffix)").appendingPathExtension(url.pathExtension)
+            candidate = named("\(base)-\(suffix)")
             suffix += 1
         }
         return candidate
