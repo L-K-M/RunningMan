@@ -31,7 +31,7 @@ struct OverviewView: View {
                     }
                 }
                 VStack(spacing: 13) {
-                    SectionHeading(title: "Your fleet", subtitle: "Local state, refreshed automatically") {
+                    SectionHeading(title: "Your fleet") {
                         Button("View all", systemImage: "arrow.right") { model.section = .runners }.buttonStyle(.link).font(.system(size: 11))
                     }
                     if model.runners.isEmpty {
