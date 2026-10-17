@@ -18,6 +18,10 @@ name: Release
       tag:
         description: Tag of an existing release to build and attach the app to
         required: true
+      announce_without_preview:
+        description: Announce the release even if the preview smoke test fails (recorded in the run summary)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -38,6 +42,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
+          # Full history: CFBundleVersion is the commit count (build-app.sh).
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Tag is a version tag
@@ -76,12 +82,18 @@ jobs:
           app="dist/RunningMan.app"
           plutil -lint "$app/Contents/Info.plist"
           test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "${TAG#v}"
+          if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+            echo "::error::The release checkout is shallow, so CFBundleVersion cannot be the commit count."
+            exit 1
+          fi
+          build_number="$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")"
+          if [ "$build_number" != "$(git rev-list --count HEAD)" ] || [ "$build_number" -le 1 ]; then
+            echo "::error::CFBundleVersion is '$build_number', expected the commit count $(git rev-list --count HEAD); was the checkout shallow?"
+            exit 1
+          fi
           lipo "$app/Contents/MacOS/RunningMan" -verify_arch arm64 x86_64
           test -s "$app/Contents/Resources/AppIcon.icns"
           codesign --verify --strict "$app"
-
-      - name: Render isolated preview
-        run: scripts/smoke-test.sh
 
       - name: Create the release if needed
         env:
@@ -111,9 +123,48 @@ jobs:
           (cd "$RUNNER_TEMP" && shasum -a 256 "$name" > "$name.sha256")
           gh release upload "$TAG" "$RUNNER_TEMP/$name" "$RUNNER_TEMP/$name.sha256" --clobber --repo "$GITHUB_REPOSITORY"
 
+      - name: Render isolated preview
+        # A smoke check of the demo-mode screenshots, run against the bundle
+        # still in dist/. A stalled capture must not keep the assets from
+        # shipping, so it runs after the upload and bounded; the last step
+        # fails the job when it did not pass, which withholds the announcement.
+        id: smoke
+        continue-on-error: true
+        timeout-minutes: 5
+        run: scripts/smoke-test.sh
+
+      - name: Upload preview screenshots
+        # Diagnostic evidence only; an artifact-service error must not fail the job.
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: RunningMan-release-preview
+          path: .local/screenshots/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Fail when the preview did not pass
+        # A timed-out or cancelled preview counts as failed; a skipped one means an
+        # earlier step already failed the job.
+        if: steps.smoke.outcome == 'failure' || steps.smoke.outcome == 'cancelled'
+        env:
+          WAIVED: ${{ inputs.announce_without_preview == true }}
+        run: |
+          if [ "$WAIVED" = true ]; then
+            echo "::warning::The preview smoke test did not pass; announcing $TAG anyway because the run was started with announce_without_preview."
+            echo "The preview smoke test did not pass. The maintainer waived it with announce_without_preview, so $TAG is announced anyway." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "::error::The preview smoke test did not pass. The assets are attached, but installed apps are not told about $TAG."
+          echo "The preview smoke test did not pass, so the update manifest was not published for $TAG. Fix the preview and rerun this workflow for the tag, or rerun it with announce_without_preview after checking the build by hand." >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
   publish-update-manifest:
     name: Publish update manifest
-    # Only after the release exists with every asset attached.
+    # Only after the release exists with every asset attached and the
+    # preview smoke test passed or a manual run waived it with
+    # announce_without_preview (the app job fails otherwise).
     needs: app
     runs-on: ubuntu-24.04
     timeout-minutes: 10

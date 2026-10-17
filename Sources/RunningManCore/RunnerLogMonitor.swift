@@ -64,6 +64,12 @@ public actor RunnerLogMonitor {
     private var resultSources: [String: ResultSource] = [:]
     private var tails: [String: String] = [:]
     private var tailBuffers: [String: LogTailBuffer] = [:]
+    /// The most recent job per runner; replaced when the worker log announces the next job.
+    private var stepTimelines: [String: JobStepTimeline] = [:]
+    private var outputCaptures: [String: JobOutputCapture] = [:]
+    private var stepLogs: [String: JobStepLog] = [:]
+    private var changedStepRunners = Set<String>()
+    private var stepRevision = 0
     private let formatter = ISO8601DateFormatter()
     private let fractionalFormatter: ISO8601DateFormatter = {
         let value = ISO8601DateFormatter(); value.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return value
@@ -155,6 +161,7 @@ public actor RunnerLogMonitor {
                     warnings.append("Could not read diagnostics for \(runner.name): \(SecretRedactor.redact(error.localizedDescription))")
                 }
             }
+            updateStepLog(for: runner)
         }
         cursors = cursors.filter { livePaths.contains($0.key) }
         let runnerIDs = Set(runners.map(\.id))
@@ -163,13 +170,40 @@ public actor RunnerLogMonitor {
             if let tail = tailBuffers[id]?.render() { tails[id] = tail }
         }
         tails = tails.filter { runnerIDs.contains($0.key) }
+        stepTimelines = stepTimelines.filter { runnerIDs.contains($0.key) }
+        outputCaptures = outputCaptures.filter { runnerIDs.contains($0.key) }
+        stepLogs = stepLogs.filter { runnerIDs.contains($0.key) }
         if jobs.count > 2_000 {
             let retained = jobs.values.sorted { $0.startedAt > $1.startedAt }.prefix(2_000)
             jobs = Dictionary(uniqueKeysWithValues: retained.map { ($0.id, $0) })
             resultSources = resultSources.filter { jobs[$0.key] != nil }
         }
         return LogScanResult(jobs: jobs.values.sorted { $0.startedAt > $1.startedAt },
-            events: events, warnings: Array(Set(warnings)).sorted(), tails: tails)
+            events: events, warnings: Array(Set(warnings)).sorted(), tails: tails, stepLogs: stepLogs)
+    }
+
+    /// Reads new output of the runner's most recent job and reassembles its steps when anything changed.
+    private func updateStepLog(for runner: InstalledRunner) {
+        guard let timeline = stepTimelines[runner.id] else { return }
+        if outputCaptures[runner.id]?.jobID != timeline.jobID {
+            outputCaptures[runner.id] = JobOutputCapture(jobID: timeline.jobID)
+            changedStepRunners.insert(runner.id)
+        }
+        let pages = runner.directory.appendingPathComponent("_diag/pages", isDirectory: true)
+        if outputCaptures[runner.id]?.read(pagesDirectory: pages, budget: 2 * 1024 * 1024,
+                                                stepsFinished: timeline.isFinished) == true {
+            changedStepRunners.insert(runner.id)
+        }
+        let jobID = jobKey(runner: LogRunnerContext(runner), id: timeline.jobID)
+        // The listener log can report completion before the worker log does.
+        let isFinished = timeline.isFinished || jobs[jobID]?.finishedAt != nil
+        let changed = changedStepRunners.remove(runner.id) != nil || stepLogs[runner.id]?.isFinished != isFinished
+        guard changed, let capture = outputCaptures[runner.id] else { return }
+        stepRevision += 1
+        stepLogs[runner.id] = JobStepLog(jobID: jobID, runnerID: runner.id, isFinished: isFinished,
+            hasOutput: capture.hasOutput, isTruncated: capture.isTruncated, revision: stepRevision,
+            steps: JobStepAssembler.steps(entries: timeline.entries, lines: capture.lines,
+                                          stepStarts: capture.stepStarts, isFinished: isFinished))
     }
 
     private func consume(_ data: Data, cursor: inout Cursor, runner: LogRunnerContext, events: inout [ActivityEvent]) {
@@ -258,11 +292,18 @@ public actor RunnerLogMonitor {
             cursor.activeID = nil
         }
         if line.containsBytes("JobRunner] Job ID "), let id = capture(#"JobRunner\] Job ID ([A-Za-z0-9-]+)"#, line) {
+            if stepTimelines[runner.id]?.jobID != id.lowercased() {
+                stepTimelines[runner.id] = JobStepTimeline(jobID: id, startedAt: date)
+                changedStepRunners.insert(runner.id)
+            }
             cursor.workerID = jobKey(runner: runner, id: id)
             if jobs[cursor.workerID!] == nil {
                 jobs[cursor.workerID!] = RunnerJob(id: cursor.workerID!, runnerID: runner.id,
                     name: "Job \(id.prefix(8))", repository: runner.repository, startedAt: date)
             }
+        }
+        if stepTimelines[runner.id]?.consume(line, date: date) == true {
+            changedStepRunners.insert(runner.id)
         }
         if line.containsBytes("Job result after all job steps finish: "),
            let result = capture(#"Job result after all job steps finish: ([A-Za-z]+)"#, line), let id = cursor.workerID {
