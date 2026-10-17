@@ -19,6 +19,12 @@ public struct ForgejoAPIError: LocalizedError, Sendable {
 
 public protocol ForgejoTokenProviding: Sendable {
     func token(for serverURL: URL) async throws -> String?
+    /// Drops any in-memory copy after the server rejected it, so the next request reads the store again.
+    func invalidateToken(for serverURL: URL) async
+}
+
+public extension ForgejoTokenProviding {
+    func invalidateToken(for serverURL: URL) async {}
 }
 
 /// One credential per HTTPS origin. Credentials never enter preferences, argv or diagnostics.
@@ -108,6 +114,9 @@ private final class SameOriginRedirectPolicy: NSObject, URLSessionTaskDelegate, 
 }
 
 public actor ForgejoAPIClient: ForgejoAPIRequesting {
+    /// Largest response body RunningMan inspects; runner and queue listings are far smaller.
+    static let maximumResponseBytes = 8 * 1024 * 1024
+    private static let oversizedResponse = "Forgejo returned too much data to inspect safely."
     private let tokens: any ForgejoTokenProviding
     private let session: URLSession
     public init(tokens: any ForgejoTokenProviding = ForgejoConnectionStore(),
@@ -134,25 +143,116 @@ public actor ForgejoAPIClient: ForgejoAPIRequesting {
         request.setValue("token " + token, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        do { return try await load(request) }
+        catch let error as ForgejoAPIError where error.statusCode == 401 {
+            // Drop the cached copy of a rejected token so the next request reads the credential store again.
+            await tokens.invalidateToken(for: origin)
+            throw error
+        }
+    }
+
+    private func load(_ request: URLRequest) async throws -> Data {
         do {
             #if os(macOS)
             let (stream, response) = try await session.bytes(for: request)
-            var bytes = Data()
+            // Decide from the response head, so an error page or an oversized
+            // listing is never downloaded.
+            let declaredLength: Int
+            do { declaredLength = try Self.acceptedLength(of: response) }
+            catch { stream.task.cancel(); throw error }
+            var bytes: [UInt8] = []
+            bytes.reserveCapacity(declaredLength)
             for try await byte in stream {
-                guard bytes.count < 8 * 1024 * 1024 else { throw ForgejoAPIError("Forgejo returned too much data to inspect safely.") }
+                guard bytes.count < Self.maximumResponseBytes else { stream.task.cancel(); throw ForgejoAPIError(Self.oversizedResponse) }
                 bytes.append(byte)
             }
+            return Data(bytes)
             #else
-            let (bytes, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request)
+            _ = try Self.acceptedLength(of: response)
+            guard data.count <= Self.maximumResponseBytes else { throw ForgejoAPIError(Self.oversizedResponse) }
+            return data
             #endif
-            guard let response = response as? HTTPURLResponse else { throw ForgejoAPIError("Forgejo returned an invalid response.") }
-            guard (200...299).contains(response.statusCode) else {
-                let backoff = response.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init).map { Date().addingTimeInterval(min(3600, max(30, $0))) }
-                throw ForgejoAPIError("Forgejo API returned HTTP \(response.statusCode). Check server access and token permissions.", statusCode: response.statusCode, retryAfter: backoff)
-            }
-            guard bytes.count <= 8 * 1024 * 1024 else { throw ForgejoAPIError("Forgejo returned too much data to inspect safely.") }
-            return bytes
         } catch let error as ForgejoAPIError { throw error }
-        catch { throw ForgejoAPIError("The Forgejo server could not be reached. Check its URL and network connection.") }
+        catch { throw Self.transportError(error) }
+    }
+
+    /// Returns the declared body length (0 when unknown) for a successful response
+    /// that fits the inspection limit, and throws for anything else.
+    private static func acceptedLength(of response: URLResponse) throws -> Int {
+        guard let response = response as? HTTPURLResponse else { throw ForgejoAPIError("Forgejo returned an invalid response.") }
+        guard (200...299).contains(response.statusCode) else { throw statusError(for: response) }
+        guard response.expectedContentLength <= maximumResponseBytes else { throw ForgejoAPIError(oversizedResponse) }
+        return max(0, Int(response.expectedContentLength))
+    }
+
+    /// Server-supplied error text is never shown; the status alone selects the advice.
+    private static func statusError(for response: HTTPURLResponse) -> ForgejoAPIError {
+        let code = response.statusCode
+        let message: String
+        switch code {
+        case 300...399:
+            let target = redirectTarget(response.value(forHTTPHeaderField: "Location"), relativeTo: response.url).map { " to " + $0 } ?? ""
+            message = "The Forgejo server redirected\(target) (HTTP \(code)). RunningMan follows redirects only within the same HTTPS address. Enter the server’s final HTTPS URL."
+        case 401:
+            message = "Forgejo rejected the access token (HTTP 401). It may be mistyped, expired or revoked. Create a new token and connect the server again."
+        case 403:
+            message = "Forgejo denied access (HTTP 403). The access token lacks permission for this scope or action. Check the token’s scopes and your role on the server."
+        case 404:
+            message = "Forgejo could not find this resource (HTTP 404). Check the repository, organization or runner, or update Forgejo if this version does not support the request."
+        case 429:
+            message = "The Forgejo server is limiting requests (HTTP 429). Wait a few minutes before trying again."
+        case 500...599:
+            message = "The Forgejo server reported an error (HTTP \(code)). Try again later, or check the server’s logs if it continues."
+        default:
+            message = "Forgejo API returned HTTP \(code). Check server access and token permissions."
+        }
+        return ForgejoAPIError(message, statusCode: code, retryAfter: retryDate(from: response.value(forHTTPHeaderField: "Retry-After"), now: Date()))
+    }
+
+    /// Retry-After holds either delay seconds or an HTTP-date (RFC 9110, section 10.2.3).
+    /// The pause is kept between 30 seconds and one hour so a server can neither
+    /// cause a request storm nor stop monitoring for days.
+    private static func retryDate(from value: String?, now: Date) -> Date? {
+        guard let value = value?.trimmingCharacters(in: .whitespaces), !value.isEmpty else { return nil }
+        let delay: TimeInterval
+        if value.allSatisfy({ $0.isASCII && $0.isNumber }) {
+            delay = TimeInterval(value) ?? .greatestFiniteMagnitude
+        } else {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(identifier: "GMT")
+            // IMF-fixdate, then the obsolete RFC 850 and asctime forms recipients must accept.
+            var date: Date?
+            for format in ["EEE, dd MMM yyyy HH:mm:ss zzz", "EEEE, dd-MMM-yy HH:mm:ss zzz", "EEE MMM d HH:mm:ss yyyy"] where date == nil {
+                formatter.dateFormat = format
+                date = formatter.date(from: value)
+            }
+            guard let date else { return nil }
+            delay = date.timeIntervalSince(now)
+        }
+        return now.addingTimeInterval(min(3600, max(30, delay)))
+    }
+
+    private static func redirectTarget(_ location: String?, relativeTo base: URL?) -> String? {
+        guard let location, let target = URL(string: location, relativeTo: base)?.absoluteURL,
+              let scheme = target.scheme?.lowercased(), let host = target.host?.lowercased(), !host.isEmpty, host.count <= 253 else { return nil }
+        return scheme + "://" + host + (target.port.map { ":\($0)" } ?? "")
+    }
+
+    /// Cancellation stays a cancellation so callers can tell it from an outage.
+    private static func transportError(_ error: Error) -> Error {
+        if error is CancellationError { return error }
+        switch (error as? URLError)?.code {
+        case .cancelled?:
+            return CancellationError()
+        case .serverCertificateUntrusted?, .serverCertificateHasBadDate?, .serverCertificateHasUnknownRoot?,
+             .serverCertificateNotYetValid?, .secureConnectionFailed?, .clientCertificateRejected?, .clientCertificateRequired?:
+            return ForgejoAPIError("The Forgejo server’s HTTPS certificate could not be verified. Check the server address and its certificate; a certificate from a private authority must be trusted by macOS first.")
+        case .timedOut?:
+            return ForgejoAPIError("The Forgejo server did not respond in time. Check its URL and network connection, then try again.")
+        default:
+            return ForgejoAPIError("The Forgejo server could not be reached. Check its URL and network connection.")
+        }
     }
 }
