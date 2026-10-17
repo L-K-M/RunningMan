@@ -115,8 +115,11 @@ struct HistoryView: View {
                 groups[current.index].jobs.append(job)
                 continue
             }
-            let day = calendar.dateInterval(of: .day, for: job.startedAt)
-                ?? DateInterval(start: calendar.startOfDay(for: job.startedAt), duration: 86_400)
+            // Days are 23 or 25 hours long when daylight saving time changes.
+            let day = calendar.dateInterval(of: .day, for: job.startedAt) ?? {
+                let start = calendar.startOfDay(for: job.startedAt)
+                return DateInterval(start: start, end: calendar.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400))
+            }()
             let index: Int
             if let existing = indexByDay[day.start] {
                 index = existing

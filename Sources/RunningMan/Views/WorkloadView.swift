@@ -2,6 +2,11 @@ import SwiftUI
 import RunningManCore
 
 struct WorkloadView: View {
+    /// Whole minutes, so the value never shows seconds that stopped updating.
+    static func queueAge(since date: Date) -> String {
+        let minutes = Int(Date().timeIntervalSince(date) / 60)
+        return minutes < 1 ? "<1m" : formattedDuration(TimeInterval(minutes * 60))
+    }
     @Environment(AppModel.self) private var model
     /// Busiest first: longest compatible queue, then highest observed busy rate.
     private var rankedRunners: [RunnerSnapshot] {
@@ -53,8 +58,12 @@ struct WorkloadView: View {
                 HStack(spacing: 12) {
                     metric("Compatible queued", value: fleet.hasQueueEvidence ? "\(fleet.queuedCount)\(fleet.isIncomplete ? "+" : "")" : "—",
                            note: "Shared across matching runners", symbol: "tray.full", color: fleet.queuedCount > 0 ? .orange : .indigo)
-                    metric("Oldest queued", value: fleet.oldestQueuedAt.map { formattedDuration(Date().timeIntervalSince($0)) } ?? "—",
-                           note: "When the server reports its age", symbol: "hourglass", color: .orange)
+                    // The age keeps growing while the queue stays the same, and quiet polls do not
+                    // re-render an unchanged queue, so this tile keeps its own minute clock.
+                    TimelineView(.everyMinute) { _ in
+                        metric("Oldest queued", value: fleet.oldestQueuedAt.map { Self.queueAge(since: $0) } ?? "—",
+                               note: "When the server reports its age", symbol: "hourglass", color: .orange)
+                    }
                     metric("Busy runners", value: "\(model.busyCount)", note: "At least one active job", symbol: "bolt.fill", color: .indigo)
                     metric("Configured slots", value: "\(model.runners.reduce(0) { $0 + $1.runner.capacity })",
                            note: "Local concurrency limit", symbol: "square.stack.3d.up", color: RunningManStyle.teal)

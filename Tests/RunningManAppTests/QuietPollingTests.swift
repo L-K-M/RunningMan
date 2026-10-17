@@ -193,6 +193,13 @@ final class QuietPollingTests: XCTestCase {
             .map { $0.jobs.map(\.id) }, [["a"], ["c", "d"]], "Unsorted input still yields one group per day.")
     }
 
+    func testQueueAgeShowsWholeMinutes() {
+        let now = Date()
+        XCTAssertEqual(WorkloadView.queueAge(since: now.addingTimeInterval(-30)), "<1m")
+        XCTAssertEqual(WorkloadView.queueAge(since: now.addingTimeInterval(-125)), "2m")
+        XCTAssertEqual(WorkloadView.queueAge(since: now.addingTimeInterval(-3_700)), "1h 1m")
+    }
+
     func testDurationsOmitZeroComponents() {
         XCTAssertEqual(formattedDuration(0), "0s")
         XCTAssertEqual(formattedDuration(59), "59s")
