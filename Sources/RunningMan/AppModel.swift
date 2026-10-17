@@ -183,6 +183,9 @@ final class AppModel {
         defer { isRefreshing = false }
         let result = await discovery.discover(additionalDirectories: importedDirectories)
         let states = await controller.snapshots(for: result.runners, allowRemoteActivity: remoteMonitoringEnabled)
+        // Process reads in a cancelled task fail, which reads as every runner being unknown.
+        // Monitoring stops when the app quits; never record that as status changes.
+        guard !Task.isCancelled else { return }
         async let githubScan = logs.scan(runners: result.runners.filter { $0.provider == .github })
         async let forgejoScan = forgejoLogs.scan(runners: result.runners.filter { $0.provider == .forgejo })
         async let cleanupScan = cleanupMonitor.scan(runners: result.runners)
