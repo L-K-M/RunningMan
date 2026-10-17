@@ -44,7 +44,7 @@ final class MenuBarTests: XCTestCase {
 
     func testAccessibilityLabelNamesTheStateAndBusyCount() {
         XCTAssertEqual(MenuBarStatus().accessibilityLabel, "RunningMan, no runners online")
-        XCTAssertEqual(MenuBarStatus(online: 1).accessibilityLabel, "RunningMan, 1 runner online, none busy")
+        XCTAssertEqual(MenuBarStatus(online: 1).accessibilityLabel, "RunningMan, 1 runner online, no jobs reported")
         XCTAssertEqual(MenuBarStatus(online: 3, busy: 1).accessibilityLabel, "RunningMan, 1 runner busy")
         XCTAssertEqual(MenuBarStatus(online: 3, busy: 2).accessibilityLabel, "RunningMan, 2 runners busy")
         XCTAssertEqual(MenuBarStatus(online: 3, busy: 2, attention: 1).accessibilityLabel, "RunningMan, 1 runner needs attention, 2 busy")
@@ -80,6 +80,11 @@ final class MenuBarTests: XCTestCase {
 
         animator.show(MenuBarStatus(online: 3, busy: 1))
         XCTAssertEqual(animator.frameRate, MenuBarAnimator.framesPerSecond(busyRunners: 1))
+
+        // Attention outranks busy: the fallen figure never animates.
+        animator.show(MenuBarStatus(online: 3, busy: 2, attention: 1))
+        XCTAssertNil(animator.frameRate)
+        XCTAssertEqual(animator.status.figure, .fallen)
 
         animator.show(MenuBarStatus(online: 3))
         XCTAssertNil(animator.frameRate, "No timer may run while idle")

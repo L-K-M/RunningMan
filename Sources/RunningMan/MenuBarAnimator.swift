@@ -8,7 +8,7 @@ struct MenuBarStatus: Equatable {
     enum Figure: Equatable {
         /// Nothing installed, or every runner stopped or disabled.
         case standing
-        /// Runners are online and none is busy.
+        /// Runners are online and none reports a job.
         case ready
         /// At least one runner is running a job.
         case running
@@ -45,7 +45,8 @@ struct MenuBarStatus: Equatable {
         case .running:
             return "RunningMan, \(busy) \(busy == 1 ? "runner" : "runners") busy"
         case .ready:
-            return "RunningMan, \(online) \(online == 1 ? "runner" : "runners") online, none busy"
+            // Not "none busy": a Forgejo runner's activity can be unverified rather than idle.
+            return "RunningMan, \(online) \(online == 1 ? "runner" : "runners") online, no jobs reported"
         case .standing:
             return "RunningMan, no runners online"
         }

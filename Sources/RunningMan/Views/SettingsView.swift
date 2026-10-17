@@ -219,10 +219,13 @@ private struct MenuRunnerRow: View {
         HStack(spacing: 8) {
             Button(action: open) {
                 HStack(spacing: 10) {
-                    Image(systemName: snapshot.status.symbol).font(.system(size: 13)).foregroundStyle(snapshot.status.color)
+                    // The rows behind the "needs attention" capsule carry the same warning.
+                    Image(systemName: snapshot.needsAttention ? "exclamationmark.triangle.fill" : snapshot.status.symbol)
+                        .font(.system(size: 13))
+                        .foregroundStyle(snapshot.needsAttention ? StatusTone.warning.text : snapshot.status.color)
                         .busySymbolEffect(snapshot.status == .busy)
                         .frame(width: 16)
-                        .accessibilityLabel(snapshot.status.title)
+                        .accessibilityLabel(snapshot.needsAttention ? "\(snapshot.status.title), needs attention" : snapshot.status.title)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 4) {
                             Text(snapshot.runner.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
