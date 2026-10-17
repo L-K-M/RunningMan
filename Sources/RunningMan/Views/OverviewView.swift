@@ -3,36 +3,28 @@ import RunningManCore
 
 struct OverviewView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         let recentJobs = model.recentJobs
         ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
-                HStack(alignment: .top) {
-                    PageHeading(eyebrow: "Mission control", title: "A clear view of your runners.", subtitle: "Every service, every job, right here on your Mac.")
-                    Spacer(minLength: 12)
-                    if let updated = model.lastUpdated {
-                        Label("Updated \(updated.formatted(date: .omitted, time: .shortened))", systemImage: "waveform.path")
-                            .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                            .padding(.horizontal, 10).padding(.vertical, 7)
-                            .background(.primary.opacity(0.035), in: Capsule()).padding(.top, 4)
-                    }
-                }
+            VStack(alignment: .leading, spacing: 24) {
+                fleetSummary
                 HStack(spacing: 12) {
-                    metric("Runners running", value: "\(model.runningCount)", footnote: "of \(model.runners.count) installed", icon: "play.circle", color: RunningManStyle.teal)
-                    metric("Busy runners", value: "\(model.busyCount)", footnote: "with at least one active job", icon: "bolt.fill", color: .indigo)
-                    metric("Jobs recorded", value: "\(model.jobs.count)", footnote: "from local runner logs", icon: "clock.arrow.circlepath", color: .purple)
-                    metric("Success rate", value: model.successRate.map { "\(Int(($0 * 100).rounded()))%" } ?? "—", footnote: "of completed jobs", icon: "checkmark.seal", color: RunningManStyle.teal)
-                }
+                    MetricTile(title: "Runners online", value: "\(model.runningCount)", footnote: "of \(model.runners.count) installed", symbol: "play.circle", tint: StatusTone.positive.text)
+                    MetricTile(title: "Busy runners", value: "\(model.busyCount)", footnote: "with at least one active job", symbol: "bolt.fill", tint: StatusTone.active.text)
+                    MetricTile(title: "Jobs recorded", value: "\(model.jobs.count)", footnote: "from local runner logs", symbol: "clock.arrow.circlepath", tint: RunningManStyle.accentText)
+                    MetricTile(title: "Success rate", value: model.successRate.map { "\(Int(($0 * 100).rounded()))%" } ?? "—", footnote: "of completed jobs", symbol: "checkmark.seal", tint: StatusTone.positive.text)
+                }.fixedSize(horizontal: false, vertical: true)
                 if !model.warnings.isEmpty {
                     Surface(padding: 12) {
                         HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(StatusTone.warning.text)
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("A little attention needed").font(.system(size: 12, weight: .semibold))
                                 ForEach(Array(model.warnings.prefix(3).enumerated()), id: \.offset) { _, warning in
                                     Text(warning).font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled)
                                 }
-                                if model.warnings.count > 3 { Text("\(model.warnings.count - 3) more in exported diagnostics").font(.system(size: 10)).foregroundStyle(.secondary) }
+                                if model.warnings.count > 3 { Text("\(model.warnings.count - 3) more in exported diagnostics").font(.system(size: 11)).foregroundStyle(.secondary) }
                             }
                             Spacer()
                         }
@@ -91,36 +83,45 @@ struct OverviewView: View {
                         }
                     }.frame(maxWidth: .infinity)
                 }
-                HStack(spacing: 6) {
-                    Image(systemName: "lock.shield").foregroundStyle(RunningManStyle.teal)
-                    Text("Built for your Mac. Runner discovery and log history stay local.")
-                }.font(.system(size: 10)).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.bottom, 4)
             }.padding(28).frame(maxWidth: 1400, alignment: .leading).frame(maxWidth: .infinity)
         }
     }
 
-    private func metric(_ title: String, value: String, footnote: String, icon: String, color: Color) -> some View {
-        Surface(padding: 16) {
-            HStack {
-                Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 3)
-                Image(systemName: icon).font(.system(size: 13)).foregroundStyle(color)
-            }
-            Text(value).font(.system(size: 33, weight: .semibold, design: .rounded)).monospacedDigit().padding(.top, 8)
-            Text(footnote).font(.system(size: 10)).foregroundStyle(.tertiary).padding(.top, 1)
+    /// The page's headline: live counts instead of a slogan, since the toolbar already
+    /// names the page.
+    private var fleetSummary: some View {
+        let total = model.runners.count, online = model.runningCount, busy = model.busyCount
+        let headline = total == 0 ? "No runners on this Mac yet"
+            : "\(online) of \(total) \(total == 1 ? "runner" : "runners") online" + (busy > 0 ? ", \(busy) busy" : "")
+        let attention = model.runners.filter { $0.status == .attention || $0.status == .unknown }.count
+        let draining = model.drainingRunnerIDs.count
+        let queue = model.fleetQueue
+        var details: [String] = []
+        if attention > 0 { details.append("\(attention) \(attention == 1 ? "needs" : "need") attention") }
+        if draining > 0 { details.append("\(draining) \(draining == 1 ? "runner" : "runners") stopping when idle") }
+        if queue.hasQueueEvidence, queue.queuedCount > 0 {
+            details.append("\(queue.queuedCount)\(queue.isIncomplete ? "+" : "") compatible \(queue.queuedCount == 1 ? "job" : "jobs") queued")
         }
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(headline).font(.system(size: 22, weight: .semibold, design: .rounded))
+                .contentTransition(.numericText()).animation(reduceMotion ? nil : .snappy, value: headline)
+            if !details.isEmpty {
+                Text(details.joined(separator: " · ")).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+        }.accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
     }
 
     private func activityRow(_ event: ActivityEvent, now: Date) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Circle().fill(event.kind == .failure ? Color.red : event.kind == .warning ? .orange : event.kind == .success ? RunningManStyle.teal : .indigo)
+            Circle().fill(event.kind == .failure ? StatusTone.critical.fill : event.kind == .warning ? StatusTone.warning.fill
+                          : event.kind == .success ? StatusTone.positive.fill : RunningManStyle.accent)
                 .frame(width: 6, height: 6).padding(.top, 5)
             VStack(alignment: .leading, spacing: 4) {
                 Text(event.title).font(.system(size: 11, weight: .medium)).lineLimit(2)
-                if let detail = event.detail { Text(detail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2) }
+                if let detail = event.detail { Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2) }
             }
             Spacer(minLength: 4)
-            Text(RelativeTime.text(for: event.date, now: now)).font(.system(size: 9)).foregroundStyle(.tertiary)
+            Text(RelativeTime.text(for: event.date, now: now)).font(.system(size: 10)).foregroundStyle(.secondary)
         }
     }
 }
@@ -134,25 +135,23 @@ struct RunnerCard: View {
             model.section = .runners
         } label: {
             Surface(padding: 17) {
-                HStack(alignment: .top) {
-                    Image(systemName: "terminal").font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(snapshot.status.color)
-                        .frame(width: 36, height: 36)
-                        .background(snapshot.status.color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                HStack(alignment: .top, spacing: 6) {
+                    RunnerGlyph(runner: snapshot.runner, status: snapshot.status, size: 36)
                     Spacer()
+                    if snapshot.runner.serviceDomain == .system { SystemServiceBadge() }
                     StatusBadge(status: snapshot.status, compact: true)
                 }
                 Text(snapshot.runner.name).font(.system(size: 14, weight: .semibold)).lineLimit(1).padding(.top, 12)
-                Text(snapshot.runner.repository).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).padding(.top, 2)
+                Text(snapshot.runner.repository).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).padding(.top, 2)
                 Text("\(snapshot.runner.provider.title) · \(snapshot.runner.capacity) \(snapshot.runner.capacity == 1 ? "slot" : "slots")")
-                    .font(.system(size: 9)).foregroundStyle(.secondary).padding(.top, 4)
+                    .font(.system(size: 10)).foregroundStyle(.secondary).padding(.top, 3)
                 Divider().padding(.vertical, 10)
                 HStack(spacing: 6) {
                     if let job = snapshot.currentJob {
-                        Image(systemName: "bolt.fill").foregroundStyle(.indigo)
+                        Image(systemName: "bolt.fill").foregroundStyle(StatusTone.active.text)
                         Text(job.name).lineLimit(1)
                     } else if model.drainingRunnerIDs.contains(snapshot.id) {
-                        Image(systemName: "moon.zzz").foregroundStyle(.orange)
+                        Image(systemName: "moon.zzz").foregroundStyle(StatusTone.warning.text)
                         Text("Stopping when idle")
                     } else {
                         Image(systemName: snapshot.startsAtLogin ? "power" : "hand.tap")
@@ -160,9 +159,10 @@ struct RunnerCard: View {
                     }
                     Spacer(minLength: 2)
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
-                }.font(.system(size: 10)).foregroundStyle(.secondary)
+                }.font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }.buttonStyle(.plain).contextMenu { RunnerActionsMenu(snapshot: snapshot) }
-            .accessibilityLabel("\(snapshot.runner.name), \(snapshot.status.title), \(snapshot.runner.repository)")
+            .accessibilityLabel("\(snapshot.runner.name), \(snapshot.status.title), \(snapshot.runner.provider.title), \(snapshot.runner.repository)"
+                                + (snapshot.runner.serviceDomain == .system ? ", system service, read-only" : ""))
     }
 }

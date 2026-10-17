@@ -45,14 +45,8 @@ struct NewRunnerSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 14) {
-                Image(systemName: "plus.rectangle.on.folder.fill").font(.system(size: 27)).foregroundStyle(.indigo)
-                    .frame(width: 52, height: 52).background(.indigo.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Give your next release a home.").font(.system(size: 22, weight: .bold, design: .rounded))
-                    Text("Register a GitHub or Forgejo runner on this Mac.").font(.system(size: 12)).foregroundStyle(.secondary)
-                }
-            }.padding(24)
+            SheetHeader(symbol: "plus.rectangle.on.folder.fill", title: "New Runner", subtitle: "Register a GitHub or Forgejo runner on this Mac.")
+                .padding(.horizontal, 24).padding(.vertical, 20)
             Divider()
             Form {
                 Section {
@@ -66,7 +60,7 @@ struct NewRunnerSheet: View {
                     TextField("Runner name", text: $name, prompt: Text("macbook-releases")).disabled(model.isCreating)
                     if attempted && !validName {
                         Text("Start with a letter or number. Use up to 64 letters, numbers, periods, hyphens or underscores.")
-                            .font(.system(size: 10)).foregroundStyle(.red)
+                            .font(.system(size: 10)).foregroundStyle(StatusTone.critical.text)
                     }
                     TextField("Labels", text: $labels, prompt: Text(provider == .github ? "local-mac-release, swift" : nativeLabel)).disabled(model.isCreating)
                     Text(provider == .github
@@ -94,21 +88,22 @@ struct NewRunnerSheet: View {
                 } header: { Text("On this Mac") }
             }.formStyle(.grouped).scrollContentBackground(.hidden)
                 .disabled(model.isCreating || checkingConnection || submitting)
-            if model.isCreating || !model.creationProgress.isEmpty {
-                HStack(alignment: .top, spacing: 10) {
+            Divider()
+            HStack(spacing: 12) {
+                Button("Cancel") { token = ""; dismiss() }.keyboardShortcut(.cancelAction).disabled(model.isCreating || checkingConnection || submitting)
+                // Progress lives in the footer, so it never takes height from the form.
+                HStack(spacing: 8) {
                     if model.isCreating { ProgressView().controlSize(.small) }
                     Text(model.creationProgress).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                        .lineLimit(4).textSelection(.enabled)
-                }.padding(.horizontal, 24).padding(.bottom, 12)
-            }
-            Divider()
-            HStack {
-                Button("Cancel") { token = ""; dismiss() }.keyboardShortcut(.cancelAction).disabled(model.isCreating || checkingConnection || submitting)
-                Spacer()
+                        .lineLimit(3).textSelection(.enabled).help(model.creationProgress)
+                }.frame(maxWidth: .infinity, alignment: .leading)
                 Button(model.isCreating || submitting ? "Creating runner…" : "Create & start runner") { create() }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(model.isCreating || checkingConnection || submitting)
-            }.padding(20)
-        }.frame(width: 640, height: 760)
+            }.padding(.horizontal, 20).padding(.vertical, 16)
+        }
+        // Flexible height: GitHub needs less room than Forgejo, and a short screen scrolls the form.
+        .frame(width: 640)
+        .frame(minHeight: 460, idealHeight: provider == .github ? 700 : 760, maxHeight: 760)
             .onAppear { forgejoServer = model.demoMode ? "https://forge.example.com" : model.defaultForgejoServer }
             .onChange(of: provider) { _, platform in
                 if labels == "local-mac-release" || labels == nativeLabel { labels = platform == .forgejo ? nativeLabel : "local-mac-release" }
@@ -123,7 +118,7 @@ struct NewRunnerSheet: View {
     @ViewBuilder private var githubFields: some View {
         TextField("GitHub URL", text: $githubURL, prompt: Text("https://github.com/owner/repository")).disabled(model.isCreating)
         Text(attempted && !validURL ? "Enter an HTTPS github.com repository or organization URL." : "Use a repository URL, or an organization URL if you have owner access.")
-            .font(.system(size: 10)).foregroundStyle(attempted && !validURL ? Color.red : .secondary)
+            .font(.system(size: 10)).foregroundStyle(attempted && !validURL ? StatusTone.critical.text : .secondary)
         HStack {
             Text(model.githubAccount.map { "Connected as \($0)" } ?? "Uses your signed-in GitHub CLI").font(.system(size: 11)).foregroundStyle(.secondary)
             Spacer()
@@ -133,7 +128,7 @@ struct NewRunnerSheet: View {
 
     @ViewBuilder private var forgejoFields: some View {
         TextField("Forgejo server", text: $forgejoServer, prompt: Text("https://forge.example.com")).disabled(model.isCreating || checkingConnection || submitting)
-        if attempted && !validURL { Text("Enter the HTTPS server URL.").font(.system(size: 10)).foregroundStyle(.red) }
+        if attempted && !validURL { Text("Enter the HTTPS server URL.").font(.system(size: 10)).foregroundStyle(StatusTone.critical.text) }
         Picker("Registration scope", selection: $forgejoScope) {
             Text("Repository").tag(ForgejoRunnerScope.repository)
             Text("Organization").tag(ForgejoRunnerScope.organization)
@@ -144,7 +139,7 @@ struct NewRunnerSheet: View {
             TextField(forgejoScope == .repository ? "Repository" : "Organization", text: $scopeName,
                       prompt: Text(forgejoScope == .repository ? "owner/repository" : "organization")).disabled(model.isCreating)
         }
-        if attempted && !validScope { Text("Enter the repository as owner/name, or the organization name.").font(.system(size: 10)).foregroundStyle(.red) }
+        if attempted && !validScope { Text("Enter the repository as owner/name, or the organization name.").font(.system(size: 10)).foregroundStyle(StatusTone.critical.text) }
         SecureField("Access token", text: $token, prompt: Text("Leave empty to use the saved connection")).disabled(model.isCreating || checkingConnection || submitting)
         Text("Saved in your login Keychain. Creating or removing runners requires runner-management permission for the selected scope. Queue monitoring needs access to its Actions jobs.")
             .font(.system(size: 10)).foregroundStyle(.secondary)

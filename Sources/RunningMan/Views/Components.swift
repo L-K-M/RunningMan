@@ -1,81 +1,42 @@
 import SwiftUI
 import RunningManCore
 
-enum RunningManStyle {
-    static let accent = Color.indigo
-    static let teal = Color(red: 0.10, green: 0.57, blue: 0.56)
-    static let canvas = Color(nsColor: .windowBackgroundColor)
-    static let surface = Color(nsColor: .controlBackgroundColor)
-    static let line = Color.primary.opacity(0.07)
-}
-
-extension RunnerStatus {
-    var color: Color {
-        switch self {
-        case .idle: return RunningManStyle.teal
-        case .busy: return .indigo
-        case .stopped: return .secondary
-        case .disabled: return .secondary
-        case .attention: return .orange
-        case .unknown: return .secondary
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .idle: return "checkmark.circle.fill"
-        case .busy: return "arrow.triangle.2.circlepath"
-        case .stopped: return "stop.circle"
-        case .disabled: return "pause.circle"
-        case .attention: return "exclamationmark.triangle.fill"
-        case .unknown: return "questionmark.circle"
-        }
-    }
-}
-
-extension JobOutcome {
-    var color: Color {
-        switch self {
-        case .running: return .indigo
-        case .success: return RunningManStyle.teal
-        case .failure: return .red
-        case .cancelled: return .orange
-        case .unknown: return .secondary
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .running: return "arrow.triangle.2.circlepath"
-        case .success: return "checkmark.circle.fill"
-        case .failure: return "xmark.circle.fill"
-        case .cancelled: return "minus.circle.fill"
-        case .unknown: return "questionmark.circle"
-        }
-    }
-}
-
 struct StatusBadge: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let status: RunnerStatus
     var compact = false
     var body: some View {
         Label(status.title, systemImage: status.symbol)
             .font(.system(size: compact ? 10 : 11, weight: .semibold))
             .foregroundStyle(status.color)
+            .contentTransition(.symbolEffect(.replace))
+            .busySymbolEffect(status == .busy)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(status.color.opacity(0.10), in: Capsule())
+            .background {
+                // Disabled reads as hollow, so it differs from stopped at a glance.
+                if status == .disabled {
+                    Capsule().strokeBorder(status.tone.fill.opacity(0.45))
+                } else {
+                    Capsule().fill(status.tone.fill.opacity(StatusTone.tintOpacity))
+                }
+            }
+            .animation(reduceMotion ? nil : .snappy, value: status)
             .accessibilityLabel("Status: \(status.title)")
     }
 }
 
 struct OutcomeBadge: View {
     let outcome: JobOutcome
+    var compact = false
     var body: some View {
         Label(outcome.title, systemImage: outcome.symbol)
-            .font(.system(size: 11, weight: .medium))
+            .font(.system(size: compact ? 10 : 11, weight: compact ? .semibold : .medium))
             .foregroundStyle(outcome.color)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(outcome.color.opacity(0.09), in: Capsule())
+            .padding(.horizontal, compact ? 6 : 8)
+            .padding(.vertical, compact ? 3 : 5)
+            .background(outcome.tone.fill.opacity(StatusTone.tintOpacity), in: Capsule())
+            .accessibilityLabel("Outcome: \(outcome.title)")
     }
 }
 
@@ -91,22 +52,7 @@ struct Surface<Content: View>: View {
         }
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RunningManStyle.surface, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(RunningManStyle.line))
-    }
-}
-
-struct PageHeading: View {
-    let eyebrow: String
-    let title: String
-    let subtitle: String
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(eyebrow.uppercased()).font(.system(size: 10, weight: .bold, design: .rounded))
-                .tracking(1.8).foregroundStyle(RunningManStyle.accent)
-            Text(title).font(.system(size: 30, weight: .bold, design: .rounded)).tracking(-0.7)
-            Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
-        }
+            .cardStyle()
     }
 }
 
@@ -221,13 +167,22 @@ struct JobRow: View {
     @Environment(AppModel.self) private var model
     let job: RunnerJob
     var showRunner = false
+    /// Adds a badge after the name for every outcome except success, so failures,
+    /// cancellations and unknown results stand out in long lists.
+    var showsOutcomeBadge = false
     let timestamp: Timestamp
     var body: some View {
         HStack(spacing: 13) {
             Image(systemName: job.outcome.symbol).font(.system(size: 16)).foregroundStyle(job.outcome.color)
+                .busySymbolEffect(job.outcome == .running)
                 .frame(width: 22)
+                .help(job.outcome.title)
+                .accessibilityLabel("Outcome: \(job.outcome.title)")
             VStack(alignment: .leading, spacing: 5) {
-                Text(job.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                HStack(spacing: 7) {
+                    Text(job.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    if showsOutcomeBadge && job.outcome != .success { OutcomeBadge(outcome: job.outcome, compact: true) }
+                }
                 HStack(spacing: 5) {
                     if let repository = job.repository { Text(repository).lineLimit(1) }
                     if let workflow = job.workflow {
@@ -235,9 +190,9 @@ struct JobRow: View {
                         Text(workflow).lineLimit(1)
                     }
                     if job.repository == nil && job.workflow == nil { Text("Recorded from local runner logs") }
-                }.font(.system(size: 10)).foregroundStyle(.secondary)
+                }.font(.system(size: 11)).foregroundStyle(.secondary)
                 if showRunner, let name = model.runnerNames[job.runnerID] {
-                    Text(name).font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Text(name).font(.system(size: 10)).foregroundStyle(.secondary)
                 }
             }
             Spacer(minLength: 8)

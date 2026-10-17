@@ -14,26 +14,20 @@ struct HistoryView: View {
         let jobs = visibleJobs
         let groups = Self.dayGroups(jobs)
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 22) {
-                HStack(alignment: .top) {
-                    PageHeading(eyebrow: "The paper trail", title: "Job history", subtitle: "A local record of the work behind your releases.")
-                    Spacer()
-                    Button("Export diagnostics…", systemImage: "square.and.arrow.up") { model.exportDiagnostics() }
-                        .controlSize(.small).padding(.top, 5)
-                }
-                HStack(spacing: 7) {
-                    outcomeChip(nil, title: "All jobs")
-                    outcomeChip(.running, title: "Running")
-                    outcomeChip(.success, title: "Success")
-                    outcomeChip(.failure, title: "Failed")
-                    outcomeChip(.cancelled, title: "Cancelled")
-                    Spacer()
-                    Picker("Runner", selection: $runnerFilter) {
-                        Text("All runners").tag("all")
-                        ForEach(model.runners) { Text($0.runner.name).tag($0.id) }
-                    }.labelsHidden().frame(maxWidth: 190).controlSize(.small)
-                }
-            }.padding(28)
+            HStack(spacing: 7) {
+                outcomeChip(nil, title: "All jobs")
+                outcomeChip(.running, title: "Running")
+                outcomeChip(.success, title: "Success")
+                outcomeChip(.failure, title: "Failed")
+                outcomeChip(.cancelled, title: "Cancelled")
+                Spacer(minLength: 12)
+                Picker("Runner", selection: $runnerFilter) {
+                    Text("All runners").tag("all")
+                    ForEach(model.runners) { Text($0.runner.name).tag($0.id) }
+                }.labelsHidden().frame(maxWidth: 190).controlSize(.small)
+                Button("Export diagnostics…", systemImage: "square.and.arrow.up") { model.exportDiagnostics() }
+                    .labelStyle(.iconOnly).controlSize(.small).help("Export diagnostics")
+            }.padding(.horizontal, 28).padding(.vertical, 14)
             Divider()
             if jobs.isEmpty {
                 EmptyPanel(symbol: model.jobs.isEmpty ? "clock.arrow.circlepath" : "line.3.horizontal.decrease.circle", title: model.jobs.isEmpty ? "Your next run starts the story" : "No matching jobs", message: model.jobs.isEmpty ? "RunningMan collects job history from installed runners. New work will appear here automatically." : "Try another outcome, runner or search term.")
@@ -46,10 +40,8 @@ struct HistoryView: View {
                             Section {
                                 ForEach(Array(group.jobs.enumerated()), id: \.element.id) { index, job in
                                     VStack(spacing: 0) {
-                                        HStack(spacing: 16) {
-                                            JobRow(job: job, showRunner: true, timestamp: .startTime)
-                                            OutcomeBadge(outcome: job.outcome).frame(width: 95, alignment: .trailing)
-                                        }.padding(.horizontal, 18)
+                                        JobRow(job: job, showRunner: true, showsOutcomeBadge: true, timestamp: .startTime)
+                                            .padding(.horizontal, 18)
                                         if index < group.jobs.count - 1 { Divider().padding(.leading, 53) }
                                     }.modifier(CardSlice(isFirst: index == 0, isLast: index == group.jobs.count - 1))
                                 }
@@ -58,7 +50,7 @@ struct HistoryView: View {
                                 // stack padding and footer are 8 pt smaller, so resting spacing is unchanged.
                                 HStack {
                                     Text(dayTitle(group.date)).font(.system(size: 11, weight: .semibold))
-                                    Text("\(group.jobs.count)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                                    Text("\(group.jobs.count)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                                 }.padding(.leading, 3).padding(.top, 8).padding(.bottom, 9)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .background(RunningManStyle.canvas)
@@ -70,11 +62,9 @@ struct HistoryView: View {
                 }
             }
             Divider()
-            HStack {
-                Text("\(jobs.count) \(jobs.count == 1 ? "job" : "jobs") shown").font(.system(size: 10)).foregroundStyle(.secondary)
-                Spacer()
-                Label("History stays on this Mac", systemImage: "internaldrive").font(.system(size: 10)).foregroundStyle(.tertiary)
-            }.padding(.horizontal, 28).padding(.vertical, 12)
+            Text("\(jobs.count) \(jobs.count == 1 ? "job" : "jobs") shown").font(.system(size: 11)).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 28).padding(.vertical, 10)
         }
     }
 
@@ -84,9 +74,9 @@ struct HistoryView: View {
             HStack(spacing: 5) {
                 if let value { Image(systemName: value.symbol).foregroundStyle(value.color) }
                 Text(title)
-            }.font(.system(size: 10, weight: selected ? .semibold : .medium))
-                .padding(.horizontal, 10).padding(.vertical, 7)
-                .foregroundStyle(selected ? RunningManStyle.accent : .secondary)
+            }.font(.system(size: 11, weight: selected ? .semibold : .medium))
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .foregroundStyle(selected ? RunningManStyle.accentText : .secondary)
                 .background(selected ? RunningManStyle.accent.opacity(0.10) : .primary.opacity(0.035), in: Capsule())
                 .overlay(Capsule().strokeBorder(selected ? RunningManStyle.accent.opacity(0.2) : .clear))
         }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
@@ -144,7 +134,8 @@ private struct CardSlice: ViewModifier {
     func body(content: Content) -> some View {
         let radius: CGFloat = 14
         let shape = UnevenRoundedRectangle(topLeadingRadius: isFirst ? radius : 0, bottomLeadingRadius: isLast ? radius : 0,
-                                           bottomTrailingRadius: isLast ? radius : 0, topTrailingRadius: isFirst ? radius : 0)
+                                           bottomTrailingRadius: isLast ? radius : 0, topTrailingRadius: isFirst ? radius : 0,
+                                           style: .continuous)
         content
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RunningManStyle.surface, in: shape)
