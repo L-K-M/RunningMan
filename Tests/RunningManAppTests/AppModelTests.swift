@@ -5,6 +5,15 @@ import RunningManServices
 @testable import RunningMan
 
 final class AppModelTests: XCTestCase {
+    @MainActor func testNotificationsKeepBackgroundRefreshWithAutomaticRefreshOff() {
+        let model = AppModel(demoMode: true)
+        model.refreshAutomatically = false
+        model.keepAwakeWhileBusy = false
+        XCTAssertFalse(model.needsBackgroundRefresh)
+        model.notificationPreferences.jobFailures = true
+        XCTAssertTrue(model.needsBackgroundRefresh, "Completions are only noticed by a refresh")
+    }
+
     @MainActor func testCleanupEvidenceIsSeparateFromJobSuccessAndSearchesRunner() {
         let model = AppModel(demoMode: true)
         XCTAssertEqual(model.cleanupRecords.count, 4)
@@ -50,6 +59,21 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(preferences.stringArray(forKey: "importedRunnerDirectories"), previousPaths)
         XCTAssertEqual(preferences.object(forKey: "refreshAutomatically") as? Bool, previousRefresh)
         XCTAssertEqual(preferences.object(forKey: "keepAwakeWhileBusy") as? Bool, previousAwake)
+    }
+
+    @MainActor func testDemoNotificationPreferencesStayInMemoryAndNeverNotify() async {
+        let preferences = UserDefaults.standard
+        let keys = ["notifications.jobFailures", "notifications.jobSuccesses", "notifications.unexpectedStops"]
+        let previous = keys.map { preferences.object(forKey: $0) as? Bool }
+        let model = AppModel(demoMode: true)
+        XCTAssertEqual(model.notificationPreferences, NotificationPreferences())
+        model.notificationPreferences.jobFailures = true
+        model.notificationPreferences.jobSuccesses = true
+        model.notificationPreferences.unexpectedStops = true
+        await model.requestNotificationAuthorization()
+        XCTAssertEqual(model.notificationAuthorization, .unavailable)
+        XCTAssertTrue(model.notificationPreferences.isAnyEnabled)
+        XCTAssertEqual(keys.map { preferences.object(forKey: $0) as? Bool }, previous)
     }
 
     @MainActor func testDemoCreationIsInMemoryAndRejectsUnsafeNames() async {

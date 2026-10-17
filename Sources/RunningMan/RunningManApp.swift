@@ -232,7 +232,8 @@ private struct WindowIdentity: NSViewRepresentable {
     }
 }
 
-@MainActor private enum SnapshotCapture {
+/// Also read by AppModel, which keeps notifications off during captures.
+@MainActor enum SnapshotCapture {
     /// scripts/smoke-test.sh sets this. The directory deliberately stays out of
     /// the command line: at launch, a bare argument that does not follow a
     /// `-key` stops SwiftUI from opening the main window. In

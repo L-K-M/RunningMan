@@ -175,6 +175,15 @@ final class AppModel {
             updateSleepPrevention()
         }
     }
+    /// Never persisted in demo mode. Turning a kind on asks macOS for permission if it has not asked yet.
+    var notificationPreferences: NotificationPreferences {
+        didSet {
+            guard notificationPreferences != oldValue else { return }
+            if !demoMode { Self.save(notificationPreferences) }
+            if notificationPreferences.isAnyEnabled { Task { await requestNotificationAuthorization() } }
+        }
+    }
+    var notificationAuthorization = NotificationAuthorization.unavailable
 
     @ObservationIgnored private let discovery = RunnerDiscovery(systemDaemonsDirectory: RunnerDiscovery.systemDaemonsDirectory)
     @ObservationIgnored private let logs = RunnerLogMonitor()
@@ -202,6 +211,14 @@ final class AppModel {
     @ObservationIgnored private var usageComputedAt: Date?
     @ObservationIgnored private var usageCapacities: [String: Int] = [:]
     @ObservationIgnored private let pollingTimer = PollingTimer()
+    @ObservationIgnored private let notifier: Notifier
+    /// Jobs that finished before this date were reparsed from existing logs and never notify.
+    @ObservationIgnored private let monitoringStartedAt = Date()
+    @ObservationIgnored private var recentUserActions: [String: Date] = [:]
+    @ObservationIgnored private var notifiedKeys: Set<String> = []
+    @ObservationIgnored private var notifiedKeyOrder: [String] = []
+    /// When each runner last notified about a stop, so a restart loop does not post a banner every cycle.
+    @ObservationIgnored private var lastStopNotifications: [String: Date] = [:]
     @ObservationIgnored var showMainWindow: (() -> Void)?
     /// The main window is on screen (not closed, minimised, hidden or fully covered).
     /// Set by the window scene and the app delegate; with `menuPanelVisible` it sets the polling cadence.
@@ -234,6 +251,9 @@ final class AppModel {
         controller = RunnerServiceController(forgejoAPI: forgejoAPI)
         forgejoInstaller = ForgejoRunnerInstaller(api: forgejoAPI)
         workloadMonitor = WorkloadMonitor(forgejo: forgejoAPI)
+        notifier = Notifier(isActive: !demoMode && SnapshotCapture.destination == nil)
+        notificationPreferences = demoMode ? NotificationPreferences() : Self.storedNotificationPreferences()
+        notificationAuthorization = notifier.isActive ? .checking : .unavailable
         history = RunnerHistoryStore(fileURL: Self.supportDirectory.appendingPathComponent("jobs.json"))
         eventStore = ActivityStore(url: Self.supportDirectory.appendingPathComponent("activity.json"))
         activitySamples = RunnerActivityStore(fileURL: Self.supportDirectory.appendingPathComponent("observed-activity.json"))
@@ -251,6 +271,17 @@ final class AppModel {
             importedDirectories = (preferences.stringArray(forKey: "importedRunnerDirectories") ?? [])
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
             restoreDrainRequests(drainRequestStore?.load() ?? [:])
+        }
+        notifier.openRunner = { [weak self] runnerID in
+            guard let self else { return }
+            selectedRunnerID = runnerID
+            section = .runners
+            showMainWindow?()
+        }
+        // A permission prompt dismissed without an answer leaves macOS undecided, and enabled
+        // kinds would then be dropped silently on every launch. Ask again while undecided.
+        if notifier.isActive && notificationPreferences.isAnyEnabled {
+            Task { [weak self] in await self?.requestNotificationAuthorization() }
         }
     }
 
@@ -335,7 +366,7 @@ final class AppModel {
                 await pollingTimer.sleep(for: PollingCadence.wait(after: clock.now - refreshed, interval: nextPollInterval()))
                 guard !Task.isCancelled else { break }
                 refreshed = clock.now
-                if refreshAutomatically || !drainingRunnerIDs.isEmpty || keepAwakeWhileBusy { await refresh() }
+                if needsBackgroundRefresh { await refresh() }
             }
         }
     }
@@ -349,6 +380,12 @@ final class AppModel {
     /// Opening the window or the menu ends a long background wait at once.
     private func visibilityChanged(wasVisible: Bool) {
         if mainWindowVisible || menuPanelVisible, !wasVisible { pollingTimer.wake() }
+    }
+
+    /// Features that depend on noticing changes keep refreshing with automatic refresh off:
+    /// stop-after-job, keep-awake and notifications (completions older than 15 minutes never notify).
+    var needsBackgroundRefresh: Bool {
+        refreshAutomatically || !drainingRunnerIDs.isEmpty || keepAwakeWhileBusy || notificationPreferences.isAnyEnabled
     }
 
     func stopMonitoring() {
@@ -378,6 +415,8 @@ final class AppModel {
     /// Never call `refresh()` from inside a pass: it would wait for its own follow-up.
     private func refreshPass() async {
         if demoMode { markUpdated(); refreshUsageIfStale(); return }
+        // Captured before the pass: a stop-after-job request this pass ends still made the stop expected.
+        let previousRunners = runners, previousJobs = jobs, previousDraining = drainingRunnerIDs
         let result = await discovery.discover(additionalDirectories: importedDirectories)
         let states = await controller.snapshots(for: result.runners, allowRemoteActivity: remoteMonitoringEnabled)
         // Process reads in a cancelled task fail, which reads as every runner being unknown.
@@ -435,6 +474,7 @@ final class AppModel {
         updateSelectedLog()
         markUpdated()
         refreshUsageIfStale()
+        postNotifications(previousRunners: previousRunners, previousJobs: previousJobs, requestedStops: previousDraining)
         updateSleepPrevention()
         if remoteMonitoringEnabled && !isRefreshingWorkload {
             Task { [weak self] in await self?.refreshWorkload() }
@@ -688,7 +728,7 @@ final class AppModel {
         guard busyRunnerIDs.insert(runner.id).inserted else { return }
         if demoMode { simulate(action, runner: runner); busyRunnerIDs.remove(runner.id); return }
         Task {
-            defer { busyRunnerIDs.remove(runner.id) }
+            defer { busyRunnerIDs.remove(runner.id); noteUserAction(on: runner.id) }
             do {
                 switch action {
                 case .start: try await controller.start(runner.runner)
@@ -733,7 +773,7 @@ final class AppModel {
         guard !busyRunnerIDs.contains(runner.id) else { return }
         busyRunnerIDs.insert(runner.id)
         Task {
-            defer { busyRunnerIDs.remove(runner.id) }
+            defer { busyRunnerIDs.remove(runner.id); noteUserAction(on: runner.id) }
             do {
                 try await controller.setStartsAtLogin(enabled, for: runner.runner)
                 record(title: enabled ? "Start at login enabled" : "Start at login disabled",
@@ -1121,6 +1161,62 @@ final class AppModel {
         if events.count > 500 { events = Array(events.prefix(500)) }
         if observedEventKeys.count > 2_000 { observedEventKeys = Set(events.map(ActivityIdentity.init)) }
         if !demoMode { Task { await eventStore.append(event) } }
+    }
+
+    func refreshNotificationAuthorization() async {
+        notificationAuthorization = await notifier.authorization()
+    }
+    func requestNotificationAuthorization() async {
+        notificationAuthorization = await notifier.requestAuthorization()
+    }
+    func openNotificationSettings() { Notifier.openSystemSettings() }
+
+    private enum NotificationKey {
+        static let jobFailures = "notifications.jobFailures"
+        static let jobSuccesses = "notifications.jobSuccesses"
+        static let unexpectedStops = "notifications.unexpectedStops"
+    }
+    private static func storedNotificationPreferences() -> NotificationPreferences {
+        let defaults = UserDefaults.standard
+        return NotificationPreferences(jobFailures: defaults.bool(forKey: NotificationKey.jobFailures),
+                                       jobSuccesses: defaults.bool(forKey: NotificationKey.jobSuccesses),
+                                       unexpectedStops: defaults.bool(forKey: NotificationKey.unexpectedStops))
+    }
+    private static func save(_ preferences: NotificationPreferences) {
+        let defaults = UserDefaults.standard
+        defaults.set(preferences.jobFailures, forKey: NotificationKey.jobFailures)
+        defaults.set(preferences.jobSuccesses, forKey: NotificationKey.jobSuccesses)
+        defaults.set(preferences.unexpectedStops, forKey: NotificationKey.unexpectedStops)
+    }
+
+    /// A runner stays in `busyRunnerIDs` while its action runs; this covers the grace period after it.
+    private func noteUserAction(on runnerID: String) {
+        let now = Date()
+        recentUserActions = recentUserActions.filter { now.timeIntervalSince($0.value) < NotificationPlanner.userActionGrace }
+        recentUserActions[runnerID] = now
+    }
+
+    /// Runs after a refresh has replaced `runners` and `jobs`, comparing them with the state before it.
+    private func postNotifications(previousRunners: [RunnerSnapshot], previousJobs: [RunnerJob], requestedStops: Set<String>) {
+        guard notifier.isActive, notificationPreferences.isAnyEnabled else { return }
+        let now = Date()
+        // An action in flight or a pending stop-after-job is the user's own doing.
+        var actions = recentUserActions
+        for id in busyRunnerIDs.union(drainingRunnerIDs).union(requestedStops) { actions[id] = now }
+        let planned = NotificationPlanner.plan(previousJobs: previousJobs, currentJobs: jobs,
+            previousRunners: previousRunners, currentRunners: runners, recentUserActions: actions,
+            monitoringStartedAt: monitoringStartedAt, alreadyNotified: notifiedKeys,
+            preferences: notificationPreferences, lastStopNotifications: lastStopNotifications, now: now)
+        guard !planned.isEmpty else { return }
+        lastStopNotifications = lastStopNotifications.filter { now.timeIntervalSince($0.value) < NotificationPlanner.stopRenotifyInterval }
+        for item in planned where item.kind == .runnerStopped { lastStopNotifications[item.runnerID] = now }
+        notifiedKeys.formUnion(planned.map(\.id))
+        notifiedKeyOrder += planned.map(\.id)
+        if notifiedKeyOrder.count > 1_000 {
+            notifiedKeyOrder.removeFirst(notifiedKeyOrder.count - 500)
+            notifiedKeys = Set(notifiedKeyOrder)
+        }
+        notifier.post(planned)
     }
 
     private func updateSleepPrevention() {
