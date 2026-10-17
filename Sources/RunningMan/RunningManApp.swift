@@ -28,7 +28,7 @@ struct RunningManApp: App {
                 Button("Import Existing Runner…") { model.importRunner() }.keyboardShortcut("o")
             }
             CommandMenu("Runners") {
-                Button("Refresh") { Task { await model.refresh() } }.keyboardShortcut("r")
+                Button("Refresh") { Task { await model.refreshNow() } }.keyboardShortcut("r")
                 Divider()
                 Button("Start All Enabled Runners") { model.startAll() }
                 Button("Stop All When Idle") { model.stopAllWhenIdle() }

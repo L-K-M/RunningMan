@@ -153,7 +153,7 @@ struct RunnerDetailView: View {
                     Text("Overview").tag("Overview")
                     Text("Job log").tag("Job log")
                     Text("Live log").tag("Live log")
-                    Text("Jobs (\(model.jobs(for: snapshot.id).count))").tag("Jobs")
+                    Text("Jobs (\(model.jobCount(for: snapshot.id)))").tag("Jobs")
                 }.pickerStyle(.segmented).labelsHidden()
             }.padding(24)
             Divider()
@@ -244,7 +244,12 @@ struct RunnerDetailView: View {
                 if !recent.isEmpty {
                     Surface {
                         SectionHeading(title: "Recent work") { Button("View jobs") { tab = "Jobs" }.buttonStyle(.link).font(.system(size: 11)) }
-                        ForEach(recent) { JobRow(job: $0) }
+                        TimelineView(.everyMinute) { _ in
+                            let now = Date()
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(recent) { JobRow(job: $0, timestamp: .relative(now: now)) }
+                            }
+                        }
                     }
                 }
             }.padding(22)
@@ -328,12 +333,15 @@ struct RunnerDetailView: View {
                 EmptyPanel(symbol: "clock.arrow.circlepath", title: "No recorded jobs", message: "Completed and active jobs are collected from this runner’s local logs.")
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(jobs) { job in
-                            HStack(spacing: 10) { JobRow(job: job); OutcomeBadge(outcome: job.outcome) }
-                            Divider()
-                        }
-                    }.padding(.horizontal, 22)
+                    TimelineView(.everyMinute) { _ in
+                        let now = Date()
+                        LazyVStack(spacing: 0) {
+                            ForEach(jobs) { job in
+                                HStack(spacing: 10) { JobRow(job: job, timestamp: .relative(now: now)); OutcomeBadge(outcome: job.outcome) }
+                                Divider()
+                            }
+                        }.padding(.horizontal, 22)
+                    }
                 }
             }
         }

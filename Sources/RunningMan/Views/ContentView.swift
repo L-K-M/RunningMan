@@ -29,12 +29,11 @@ struct ContentView: View {
             .navigationTitle(model.section.title)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    if model.isRefreshing {
-                        ProgressView().controlSize(.small).frame(width: 22).help("Refreshing runner state")
-                    } else {
-                        Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                            .help("Refresh runner state (⌘R)").keyboardShortcut("r")
-                    }
+                    // Always the same button, so the toolbar never changes width or flickers;
+                    // background polls do not show progress here.
+                    Button { Task { await model.refreshNow() } } label: { RefreshSymbol(isActive: model.isManualRefreshing) }
+                        .disabled(model.isManualRefreshing)
+                        .help(model.isManualRefreshing ? "Refreshing runner state" : "Refresh runner state (⌘R)").keyboardShortcut("r")
                     Menu {
                         Button("Import existing runner…", systemImage: "folder.badge.plus") { model.importRunner() }
                         Button("Export diagnostics…", systemImage: "square.and.arrow.up") { model.exportDiagnostics() }
@@ -128,5 +127,19 @@ struct ContentView: View {
                 }
             }.padding(16)
         }.frame(maxHeight: .infinity).background(.thinMaterial)
+    }
+}
+
+/// Spins while a manual refresh runs on macOS 15 and later, unless Reduce Motion is on.
+/// On macOS 14 the disabled button alone shows that a refresh is in progress.
+private struct RefreshSymbol: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let isActive: Bool
+    var body: some View {
+        if #available(macOS 15, *) {
+            Image(systemName: "arrow.clockwise").symbolEffect(.rotate, isActive: isActive && !reduceMotion)
+        } else {
+            Image(systemName: "arrow.clockwise")
+        }
     }
 }
