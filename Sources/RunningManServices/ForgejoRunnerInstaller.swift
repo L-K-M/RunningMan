@@ -135,7 +135,7 @@ public actor ForgejoRunnerInstaller {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         try FileManager.default.createDirectory(at: diagnostics, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(at: destination.appendingPathComponent("_work"), withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        let label = "io.github.l-k-m.RunningMan.forgejo." + UUID().uuidString.lowercased()
+        let label = ManagedServiceLabel.forgejoNew + UUID().uuidString.lowercased()
         var registration: ForgejoRegistrationDetails?
         do {
             if let manual { registration = manual }

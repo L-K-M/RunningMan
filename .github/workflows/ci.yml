@@ -9,9 +9,11 @@ name: Native macOS app
 permissions:
   contents: read
 
+# Cancel an in-progress run when a *PR branch* is pushed again — but never a
+# push to main, or that commit keeps a permanently "cancelled" status.
 concurrency:
   group: native-app-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   app:

@@ -14,6 +14,11 @@ Read README.md and docs/architecture.md. This is an independent native macOS app
 - Demo mode must not modify live runners, preferences or imported-directory settings. Keep demo data fictional; no company names, credentials, user paths or actual job logs in tracked files.
 - Run swift test, the applicable build and preview smoke test. Inspect rendered light/dark screenshots after UI changes.
 - Preserve the existing LICENSE and ignored IDE files.
+- Reverse-DNS identifiers live under `ch.lkmc.*`: the bundle id is
+  `ch.lkmc.RunningMan`. New managed Forgejo services get launchd labels under
+  `ch.lkmc.RunningMan.forgejo.*`; services installed under the legacy
+  `io.github.l-k-m.RunningMan.forgejo.*` prefix remain managed
+  (`ManagedServiceLabel` in RunnerServiceController.swift owns the list).
 
 ## Releases
 

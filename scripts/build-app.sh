@@ -33,7 +33,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>io.github.l-k-m.RunningMan</string>
+  <key>CFBundleIdentifier</key><string>ch.lkmc.RunningMan</string>
   <key>CFBundleName</key><string>RunningMan</string>
   <key>CFBundleDisplayName</key><string>RunningMan</string>
   <key>CFBundleExecutable</key><string>RunningMan</string>
