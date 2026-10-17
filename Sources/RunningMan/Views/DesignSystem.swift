@@ -288,7 +288,9 @@ private struct BusySymbolEffect: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isBusy: Bool
     func body(content: Content) -> some View {
-        content.symbolEffect(.bounce, value: isBusy).symbolEffectsRemoved(reduceMotion)
+        // symbolEffectsRemoved only strips effects applied above it, so it cannot stop this
+        // bounce; a constant trigger value can. It also keeps the view's identity stable.
+        content.symbolEffect(.bounce, value: reduceMotion ? false : isBusy)
     }
 }
 
