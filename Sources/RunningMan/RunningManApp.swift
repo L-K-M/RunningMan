@@ -36,7 +36,7 @@ struct RunningManApp: App {
                 }
             }
         }
-        Settings { SettingsView().environment(model).environment(updates) }
+        Settings { SettingsView().environment(model).environment(updates).tint(RunningManStyle.accent) }
         MenuBarExtra {
             RunnerMenuView().environment(model)
         } label: {

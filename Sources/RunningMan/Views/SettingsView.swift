@@ -40,7 +40,7 @@ struct SettingsView: View {
                     }
                 }
                 Text("Forgetting a connection removes RunningMan’s API token. Registered runners keep their own connection and continue running.")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             } header: { Text("Queues & Forgejo") }
             Section {
                 LabeledContent("Installed runners", value: "\(model.runners.count)")
@@ -75,10 +75,11 @@ struct SettingsView: View {
             } header: { Text("Updates") }
             Section {
                 HStack(spacing: 12) {
-                    Image(systemName: "figure.run.circle.fill").font(.system(size: 32)).foregroundStyle(.indigo)
+                    Image(systemName: "figure.run.circle.fill").font(.system(size: 32)).symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, RunningManStyle.accent)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("RunningMan").font(.system(size: 14, weight: .semibold, design: .rounded))
-                        Text("A little clarity for the runners behind your releases.").font(.system(size: 10)).foregroundStyle(.secondary)
+                        Text("A little clarity for the runners behind your releases.").font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     Spacer()
                 }
