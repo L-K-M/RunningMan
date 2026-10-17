@@ -153,9 +153,10 @@ public actor RunnerDiscovery {
                     }
                 }
                 let labelValues = metadata["labels"] as? [Any] ?? []
-                let runnerLabels = labelValues.compactMap { value -> String? in
+                var runnerLabels = labelValues.compactMap { value -> String? in
                     (value as? String) ?? (value as? [String: Any])?["name"] as? String
                 }
+                if runnerLabels.isEmpty { runnerLabels = GitHubLabelSidecar.read(from: canonical) }
                 let urlString = metadata["gitHubUrl"] as? String ?? metadata["githubUrl"] as? String
                 let githubURL = urlString.flatMap(URL.init(string:)).flatMap { url -> URL? in
                     guard url.scheme == "https", url.host != nil, url.user == nil, url.password == nil else { return nil }

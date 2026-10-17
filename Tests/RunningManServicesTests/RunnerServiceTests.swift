@@ -521,11 +521,22 @@ final class InstallerSafetyTests: XCTestCase {
     }
 }
 
+private final class ProgressMessages: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+    func append(_ message: String) { lock.withLock { messages.append(message) } }
+    var all: [String] { lock.withLock { messages } }
+}
+
 private actor InstallerExecutor: ProcessExecuting {
     let home: URL
     let failRegistration: Bool
+    /// Leaves a folder where the label sidecar goes, so writing it fails after registration.
+    let blockLabelSidecar: Bool
     var requests: [ProcessRequest] = []
-    init(home: URL, failRegistration: Bool = false) { self.home = home; self.failRegistration = failRegistration }
+    init(home: URL, failRegistration: Bool = false, blockLabelSidecar: Bool = false) {
+        self.home = home; self.failRegistration = failRegistration; self.blockLabelSidecar = blockLabelSidecar
+    }
     func recorded() -> [ProcessRequest] { requests }
     func run(_ request: ProcessRequest) async throws -> ProcessResult {
         requests.append(request)
@@ -556,6 +567,9 @@ private actor InstallerExecutor: ProcessExecuting {
             let name = arguments[arguments.firstIndex(of: "--name")! + 1]
             let object: [String: Any] = ["agentName": name, "agentId": 42, "gitHubUrl": "https://github.com/example/project"]
             try JSONSerialization.data(withJSONObject: object).write(to: request.directory!.appendingPathComponent(".runner"))
+            if blockLabelSidecar {
+                try FileManager.default.createDirectory(at: request.directory!.appendingPathComponent(GitHubLabelSidecar.fileName), withIntermediateDirectories: true)
+            }
         }
         if arguments.last == "install", arguments.first?.hasSuffix("/svc.sh") == true {
             let root = request.directory!
@@ -590,6 +604,41 @@ final class InstallerFlowTests: XCTestCase {
         XCTAssertTrue(commands.contains { $0.arguments.first == "kickstart" })
         XCTAssertFalse(commands.contains { $0.arguments.joined().contains("EPHEMERAL_REG_TOKEN") })
         XCTAssertEqual(commands.filter { $0.environment["ACTIONS_RUNNER_INPUT_TOKEN"] != nil }.count, 1)
+        // GitHub's .runner has no labels, so the labels typed at creation must survive discovery.
+        let sidecar = root.appendingPathComponent(GitHubLabelSidecar.fileName).path
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: sidecar)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let discovered = await RunnerDiscovery(homeDirectory: home).discover(additionalDirectories: [root])
+        XCTAssertEqual(discovered.runners.first { $0.directory.path == root.path }?.labels, ["local-mac-release"])
+    }
+    func testLabelsThatCannotBeRecordedAreRefusedBeforeRegistration() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-installer-tests-" + UUID().uuidString).resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let executor = InstallerExecutor(home: home)
+        // Each label passes the per-label rules, but together they exceed the sidecar's size.
+        let labels = (0..<100).map { String(format: "%03d", $0) + String(repeating: "x", count: 253) }
+        do {
+            _ = try await GitHubRunnerInstaller(homeDirectory: home, executor: executor).create(CreateRunnerRequest(
+                githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: labels, directory: home.appendingPathComponent("created"))) { _ in }
+            XCTFail("Expected the label set to be refused")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("16 KB"), error.localizedDescription) }
+        let commands = await executor.recorded()
+        XCTAssertTrue(commands.isEmpty, "Nothing is downloaded or registered for labels that could not be recorded")
+        XCTAssertTrue(GitHubLabelSidecar.isValid(Array(labels.prefix(40))))
+    }
+    func testFailedLabelSidecarWriteDoesNotAbandonSetup() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-installer-tests-" + UUID().uuidString).resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let executor = InstallerExecutor(home: home, blockLabelSidecar: true)
+        let messages = ProgressMessages()
+        let runner = try await GitHubRunnerInstaller(homeDirectory: home, executor: executor).create(CreateRunnerRequest(
+            githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: ["local-mac-release"],
+            directory: home.appendingPathComponent("created"), startsAtLogin: false, startImmediately: false)) { messages.append($0) }
+        XCTAssertEqual(runner.agentID, 42)
+        XCTAssertTrue(messages.all.contains { $0.contains("could not be saved locally") }, "\(messages.all)")
+        let commands = await executor.recorded()
+        XCTAssertTrue(commands.contains { $0.arguments.last == "install" }, "The login service is still installed")
     }
     func testRegistrationFailurePreservesPartialInstallationAndRedactsToken() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-installer-tests-" + UUID().uuidString).resolvingSymlinksInPath()
@@ -599,12 +648,14 @@ final class InstallerFlowTests: XCTestCase {
         let installer = GitHubRunnerInstaller(homeDirectory: home, executor: executor)
         let root = home.appendingPathComponent("created")
         do {
-            _ = try await installer.create(CreateRunnerRequest(githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: [], directory: root)) { _ in }
+            _ = try await installer.create(CreateRunnerRequest(githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: ["local-mac-release"], directory: root)) { _ in }
             XCTFail("Expected registration failure")
         } catch {
             XCTAssertFalse(error.localizedDescription.contains("EPHEMERAL_REG_TOKEN"))
             XCTAssertTrue(error.localizedDescription.contains("preserved"))
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("config.sh").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(GitHubLabelSidecar.fileName).path),
+                       "Labels are recorded only after GitHub accepted the registration")
     }
 }
