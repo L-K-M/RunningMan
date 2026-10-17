@@ -2,6 +2,10 @@
 
 A native macOS home for your self-hosted GitHub Actions and Forgejo runners.
 
+> [!IMPORTANT]
+> LLM disclosure: This codebase was written with substantial help from large language models: AI coding agents working from the [`AGENTS.md`](AGENTS.md) brief in this repo.
+
+
 See what is installed, what is working, what ran, and what will start when you log in. RunningMan discovers existing installations in place and keeps their configuration and workspaces where they are.
 
 ![RunningMan dashboard with fictional preview runners](docs/images/overview.png)
