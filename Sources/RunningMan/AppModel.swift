@@ -79,12 +79,12 @@ final class AppModel {
 
     @ObservationIgnored private let discovery = RunnerDiscovery(systemDaemonsDirectory: RunnerDiscovery.systemDaemonsDirectory)
     @ObservationIgnored private let logs = RunnerLogMonitor()
-    @ObservationIgnored private let controller = RunnerServiceController()
+    @ObservationIgnored private let controller: RunnerServiceController
     @ObservationIgnored private let installer = GitHubRunnerInstaller()
-    @ObservationIgnored private let forgejoInstaller = ForgejoRunnerInstaller()
-    @ObservationIgnored private let forgejoConnections = ForgejoConnectionStore()
+    @ObservationIgnored private let forgejoInstaller: ForgejoRunnerInstaller
+    @ObservationIgnored private let forgejoConnections: ForgejoConnectionStore
     @ObservationIgnored private let forgejoLogs = ForgejoLogMonitor()
-    @ObservationIgnored private let workloadMonitor = WorkloadMonitor()
+    @ObservationIgnored private let workloadMonitor: WorkloadMonitor
     @ObservationIgnored private let cleanupMonitor = RunnerCleanupMonitor()
     @ObservationIgnored private let history: RunnerHistoryStore
     @ObservationIgnored private let eventStore: ActivityStore
@@ -106,6 +106,14 @@ final class AppModel {
 
     init(demoMode: Bool = CommandLine.arguments.contains("--demo")) {
         self.demoMode = demoMode
+        // One credential store and API client, so a token read from Keychain or saved
+        // by Connect is shared by status checks, queue monitoring and runner setup.
+        let connections = ForgejoConnectionStore()
+        let forgejoAPI = ForgejoAPIClient(tokens: connections)
+        forgejoConnections = connections
+        controller = RunnerServiceController(forgejoAPI: forgejoAPI)
+        forgejoInstaller = ForgejoRunnerInstaller(api: forgejoAPI)
+        workloadMonitor = WorkloadMonitor(forgejo: forgejoAPI)
         history = RunnerHistoryStore(fileURL: Self.supportDirectory.appendingPathComponent("jobs.json"))
         eventStore = ActivityStore(url: Self.supportDirectory.appendingPathComponent("activity.json"))
         activitySamples = RunnerActivityStore(fileURL: Self.supportDirectory.appendingPathComponent("observed-activity.json"))
@@ -404,10 +412,7 @@ final class AppModel {
         do {
             let origin = try ForgejoConnectionStore.origin(for: rawURL)
             if demoMode { forgejoAccount = "octocat"; return true }
-            if !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                try await forgejoConnections.setToken(token, for: origin)
-            }
-            let account = try await forgejoInstaller.account(serverURL: origin)
+            let account = try await forgejoInstaller.connect(serverURL: origin, candidateToken: token, savingTo: forgejoConnections)
             forgejoAccount = account
             defaultForgejoServer = origin.absoluteString
             if !forgejoServers.contains(origin) { forgejoServers.append(origin) }
