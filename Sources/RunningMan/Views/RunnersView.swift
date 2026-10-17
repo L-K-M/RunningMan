@@ -125,6 +125,12 @@ struct RunnerDetailView: View {
                     StatusBadge(status: snapshot.status)
                     if model.drainingRunnerIDs.contains(snapshot.id) {
                         Label("Stopping when idle", systemImage: "moon.zzz").font(.system(size: 10)).foregroundStyle(.orange)
+                            .fixedSize()
+                        if let failure = model.drainFailures[snapshot.id] {
+                            Label(failure.message, systemImage: "exclamationmark.triangle.fill")
+                                .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                                .help("Automatic stop attempt \(failure.attempts) of \(DrainFailure.attemptLimit) failed at \(failure.date.formatted(date: .omitted, time: .shortened)):\n\(failure.message)\nRunningMan tries again after \(failure.retryDate.formatted(date: .omitted, time: .shortened)).")
+                        }
                     }
                     Spacer()
                     if isActing { ProgressView().controlSize(.small) }

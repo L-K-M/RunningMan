@@ -148,6 +148,58 @@ final class AppModelTests: XCTestCase {
                                                    inProgress: []), [])
     }
 
+    func testDrainFailureRetriesBackOffAndCapAtFiveMinutes() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var failure: DrainFailure?
+        var delays: [TimeInterval] = []
+        for _ in 0..<6 {
+            failure = DrainFailure.after(failure, message: "Synthetic failure", at: start)
+            delays.append(failure!.retryDate.timeIntervalSince(start))
+        }
+        XCTAssertEqual(delays, [30, 60, 120, 240, 300, 300])
+        XCTAssertFalse(DrainFailure(attempts: DrainFailure.attemptLimit - 1, message: "", date: start).exhaustsAttempts)
+        XCTAssertTrue(DrainFailure(attempts: DrainFailure.attemptLimit, message: "", date: start).exhaustsAttempts)
+    }
+
+    @MainActor func testAutomaticStopFailuresStayQuietAndGiveUpWithWarning() {
+        let model = AppModel(demoMode: true)
+        let busy = model.runners.first { $0.status == .busy && $0.runner.provider == .github }!
+        model.perform(.drain, on: busy)
+        let start = Date()
+        let reason = "Cannot verify whether this runner is busy. No action was taken."
+        model.noteAutomaticStopFailure(runnerID: busy.id, message: reason, at: start)
+        model.noteAutomaticStopFailure(runnerID: busy.id, message: reason, at: start.addingTimeInterval(31))
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.events.filter { $0.title == "Automatic stop failed" }.count, 1)
+        XCTAssertEqual(model.drainFailures[busy.id]?.attempts, 2)
+        for attempt in 3...DrainFailure.attemptLimit {
+            model.noteAutomaticStopFailure(runnerID: busy.id, message: "Synthetic launchctl failure \(attempt)",
+                                           at: start.addingTimeInterval(Double(attempt) * 300))
+        }
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.drainingRunnerIDs.contains(busy.id))
+        XCTAssertNil(model.drainFailures[busy.id])
+        XCTAssertEqual(model.events.filter { $0.title == "Automatic stop failed" }.count, DrainFailure.attemptLimit - 2)
+        XCTAssertTrue(model.events.contains {
+            $0.title == "Stop after job cancelled: \(busy.runner.name) could not be stopped" && $0.kind == .warning
+        })
+    }
+
+    @MainActor func testAutomaticStopWaitsForBackoffBeforeRetrying() {
+        let model = AppModel(demoMode: true)
+        let idle = model.runners.first { $0.status == .idle && $0.runner.provider == .github }!
+        model.drainingRunnerIDs.insert(idle.id)
+        let start = Date()
+        model.noteAutomaticStopFailure(runnerID: idle.id, message: "Synthetic failure", at: start)
+        model.processDrainRequests(now: start.addingTimeInterval(29))
+        XCTAssertEqual(model.runners.first { $0.id == idle.id }?.status, .idle)
+        XCTAssertTrue(model.drainingRunnerIDs.contains(idle.id))
+        model.processDrainRequests(now: start.addingTimeInterval(31))
+        XCTAssertEqual(model.runners.first { $0.id == idle.id }?.status, .stopped)
+        XCTAssertFalse(model.drainingRunnerIDs.contains(idle.id))
+        XCTAssertNil(model.drainFailures[idle.id])
+    }
+
     func testHistoricalActivityDeduplicatesAcrossRelaunchAndDatePrecision() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

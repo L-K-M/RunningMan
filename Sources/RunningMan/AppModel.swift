@@ -18,6 +18,24 @@ enum AppSection: String, CaseIterable, Identifiable {
 
 enum RunnerAction { case start, stop, enable, disable, drain, delete }
 
+/// Who asked for an action. Only user-initiated failures raise the alert, which brings the window forward.
+enum ActionOrigin { case user, automatic }
+
+/// The last failed automatic stop-after-job attempt for one runner. Retries back off so a stop
+/// that keeps failing neither floods the activity log nor runs on every poll.
+struct DrainFailure: Equatable {
+    static let attemptLimit = 5
+    let attempts: Int
+    let message: String
+    let date: Date
+    /// 30 s after the first failure, doubling up to 5 minutes.
+    var retryDate: Date { date.addingTimeInterval(min(30 * pow(2, Double(max(attempts, 1) - 1)), 300)) }
+    var exhaustsAttempts: Bool { attempts >= Self.attemptLimit }
+    static func after(_ previous: DrainFailure?, message: String, at date: Date) -> DrainFailure {
+        DrainFailure(attempts: (previous?.attempts ?? 0) + 1, message: message, date: date)
+    }
+}
+
 struct RunnerConfirmation: Identifiable {
     let id = UUID()
     let title: String
@@ -54,7 +72,15 @@ final class AppModel {
     var searchText = ""
     var isRefreshing = false
     var busyRunnerIDs: Set<String> = []
-    var drainingRunnerIDs: Set<String> = []
+    var drainingRunnerIDs: Set<String> = [] {
+        didSet {
+            // Failure records belong to a request; ending the request ends its retry state.
+            if drainFailures.keys.contains(where: { !drainingRunnerIDs.contains($0) }) {
+                drainFailures = drainFailures.filter { drainingRunnerIDs.contains($0.key) }
+            }
+        }
+    }
+    var drainFailures: [String: DrainFailure] = [:]
     var lastUpdated: Date?
     var logText = ""
     var showingNewRunner = false { didSet { if showingNewRunner { showMainWindow?() } } }
@@ -242,14 +268,38 @@ final class AppModel {
         }
     }
 
-    /// Runs after each refresh: ends requests that no longer apply, then stops drained runners that have gone idle.
-    func processDrainRequests() {
+    /// Runs after each refresh: ends requests that no longer apply, then stops drained runners that have
+    /// gone idle, waiting out the backoff after a failed attempt.
+    func processDrainRequests(now: Date = Date()) {
         for id in Self.endedDrainRequests(drainingRunnerIDs, runners: runners, inProgress: busyRunnerIDs).sorted() {
             drainingRunnerIDs.remove(id)
             record(title: "Stop after job ended: \(drainRunnerName(id)) is no longer running", runnerID: id)
         }
         for runner in runners where drainingRunnerIDs.contains(runner.id) && runner.status == .idle && !busyRunnerIDs.contains(runner.id) {
-            runAction(.stop, on: runner)
+            if let failure = drainFailures[runner.id], failure.retryDate > now { continue }
+            runAction(.stop, on: runner, origin: .automatic)
+        }
+    }
+
+    /// Automatic stops fail quietly: each distinct reason is logged once per runner, retries back off,
+    /// and the request ends with a warning after `DrainFailure.attemptLimit` attempts.
+    func noteAutomaticStopFailure(runnerID: String, message: String, at date: Date = Date()) {
+        let name = drainRunnerName(runnerID)
+        guard drainingRunnerIDs.contains(runnerID) else {
+            record(title: "Automatic stop failed", runnerID: runnerID, detail: "\(name): \(message)", kind: .failure)
+            return
+        }
+        let previous = drainFailures[runnerID]
+        let failure = DrainFailure.after(previous, message: message, at: date)
+        if failure.exhaustsAttempts {
+            drainingRunnerIDs.remove(runnerID)
+            record(title: "Stop after job cancelled: \(name) could not be stopped", runnerID: runnerID,
+                   detail: "\(failure.attempts) automatic attempts failed. Last error: \(message)", kind: .warning)
+            return
+        }
+        drainFailures[runnerID] = failure
+        if previous?.message != message {
+            record(title: "Automatic stop failed", runnerID: runnerID, detail: "\(name): \(message)", kind: .failure)
         }
     }
 
@@ -343,7 +393,7 @@ final class AppModel {
     }
     func cancelPendingAction() { confirmation = nil; pendingAction = nil }
 
-    private func runAction(_ action: RunnerAction, on runner: RunnerSnapshot, force: Bool = false) {
+    private func runAction(_ action: RunnerAction, on runner: RunnerSnapshot, force: Bool = false, origin: ActionOrigin = .user) {
         if demoMode { simulate(action, runner: runner); return }
         busyRunnerIDs.insert(runner.id)
         Task {
@@ -371,8 +421,14 @@ final class AppModel {
                 record(title: title, runnerID: runner.id, detail: runner.runner.name, kind: .success)
                 await refresh()
             } catch {
-                errorMessage = Self.message(error)
-                record(title: "Runner action failed", runnerID: runner.id, detail: Self.message(error), kind: .failure)
+                let message = Self.message(error)
+                switch origin {
+                case .user:
+                    errorMessage = message
+                    record(title: "Runner action failed", runnerID: runner.id, detail: message, kind: .failure)
+                case .automatic:
+                    noteAutomaticStopFailure(runnerID: runner.id, message: message)
+                }
             }
         }
     }
