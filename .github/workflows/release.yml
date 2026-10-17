@@ -134,7 +134,9 @@ jobs:
           echo "The preview smoke test did not pass, so installed apps are not told about $TAG. Fix the preview, then rerun this workflow for the tag." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload preview screenshots
+        # Diagnostic evidence only; an artifact-service error must not fail the job.
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: RunningMan-release-preview
