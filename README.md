@@ -32,7 +32,7 @@ RunningMan is an independent personal project. It uses SwiftUI and AppKit, with 
 
 Requires macOS 14 or later.
 
-<!-- latest-release -->[RunningMan-v1.0.0.zip](https://github.com/L-K-M/RunningMan/releases/download/v1.0.0/RunningMan-v1.0.0.zip)<!-- /latest-release --> (or an older one from the [releases](https://github.com/L-K-M/RunningMan/releases) list), unzip, and copy **RunningMan.app** to Applications. The build is ad-hoc signed, not notarized: open it once, click Done, then System Settings → Privacy & Security → Open Anyway (Control-click → Open on macOS 14).
+<!-- latest-release -->[RunningMan-v1.2.0.zip](https://github.com/L-K-M/RunningMan/releases/download/v1.2.0/RunningMan-v1.2.0.zip)<!-- /latest-release --> (or an older one from the [releases](https://github.com/L-K-M/RunningMan/releases) list), unzip, and copy **RunningMan.app** to Applications. The build is ad-hoc signed, not notarized: open it once, click Done, then System Settings → Privacy & Security → Open Anyway (Control-click → Open on macOS 14).
 
 Once installed, RunningMan checks a small public manifest file once a day and shows a banner when a newer release exists. Turn it off in Settings → Updates.
 
