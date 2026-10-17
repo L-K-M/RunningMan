@@ -169,7 +169,10 @@ public actor RunnerServiceController {
             // exactly that path, so another service with the same label is never touched.
             let target = domain + "/" + plist.deletingPathExtension().lastPathComponent
             let state = try await executor.run(ProcessRequest(executable: "/bin/launchctl", arguments: ["print", target]))
-            if state.status == 0, !state.timedOut, !state.truncated, Self.parseLoadedServicePath(state.output) == plist.path {
+            guard !state.timedOut, !state.truncated, state.status == 0 || state.status == Self.launchctlServiceNotFound else {
+                throw RunnerServiceError("Cannot verify whether the runner service is loaded. The runner was not stopped.")
+            }
+            if state.status == 0, Self.parseLoadedServicePath(state.output) == plist.path {
                 _ = try await checked(executor, ProcessRequest(executable: "/bin/launchctl", arguments: ["bootout", target]), operation: "Stop runner")
             }
         }
@@ -179,10 +182,11 @@ public actor RunnerServiceController {
         guard let pid = RunnerProcesses(processes.output).pid(for: runner) else { return }
         let termination = ProcessRequest(executable: "/bin/kill", arguments: ["-TERM", String(pid)])
         let result = try await executor.run(termination)
-        // The process can exit on its own between the snapshot and the signal.
-        let alreadyExited = result.status != 0 && !result.timedOut && result.error.contains("No such process")
-        if !alreadyExited { _ = try requireSuccess(result, of: termination, operation: "Stop manually started runner") }
-        try await waitForExit(of: runner)
+        guard result.status != 0 || result.timedOut || result.truncated else { try await waitForExit(of: runner); return }
+        // The process can exit on its own between the snapshot and the signal, so a
+        // failed signal is an error only while the process is still present.
+        do { try await waitForExit(of: runner) }
+        catch { _ = try requireSuccess(result, of: termination, operation: "Stop manually started runner"); throw error }
     }
     /// A signal does not prove the runner exited, and another supervisor may start
     /// it again. Poll briefly so a surviving process is never reported as stopped.

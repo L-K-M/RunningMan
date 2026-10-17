@@ -187,6 +187,28 @@ final class RunnerServiceTests: XCTestCase {
         let commands = await fake.recorded()
         XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" }, "launchd does not report the deleted plist, so nothing is unloaded")
     }
+    func testStaleServiceMarkerRefusesWhenLoadStateCannotBeRead() async throws {
+        try FileManager.default.removeItem(at: plist)
+        let listener = "777 1 \(runner.directory.path)/bin/Runner.Listener run --startuptype service\n"
+        let fake = FakeExecutor()
+        await fake.configure(processes: listener, failures: ["print gui/\(getuid())/\(label)": ProcessResult(status: 5, output: "", error: "Input/output error")])
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        do { try await controller.stop(runner); XCTFail("Expected a refusal") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Cannot verify whether the runner service is loaded"), error.localizedDescription) }
+        let commands = await fake.recorded()
+        XCTAssertFalse(commands.contains { $0.arguments.first == "bootout" || $0.executable == "/bin/kill" })
+    }
+    func testFailedSignalIsAnErrorOnlyWhileTheProcessRemains() async throws {
+        let listener = "777 1 \(runner.directory.path)/bin/Runner.Listener run --startuptype service\n"
+        let denied = ProcessResult(status: 1, output: "", error: "kill: 777: Operation not permitted")
+        let gone = FakeExecutor()
+        await gone.configure(processes: listener, failures: ["-TERM 777": denied], processesAfterKill: "")
+        try await RunnerServiceController(homeDirectory: home, executor: gone).stop(runner)
+        let stays = FakeExecutor()
+        await stays.configure(processes: listener, failures: ["-TERM 777": denied])
+        do { try await RunnerServiceController(homeDirectory: home, executor: stays).stop(runner); XCTFail("Expected the signal failure") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Stop manually started runner failed"), error.localizedDescription) }
+    }
     func testStaleServiceMarkerStillUnloadsTheServiceLoadedFromIt() async throws {
         try FileManager.default.removeItem(at: plist)
         let target = "gui/\(getuid())/\(label)"

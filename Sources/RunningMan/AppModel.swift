@@ -551,10 +551,11 @@ final class AppModel {
     }
 
     func revealRunner(_ runner: InstalledRunner) {
-        // Opening a directory that LaunchServices treats as a package launches it.
-        if (try? runner.directory.resourceValues(forKeys: [.isPackageKey]).isPackage) == true {
-            NSWorkspace.shared.activateFileViewerSelecting([runner.directory])
-        } else { NSWorkspace.shared.open(runner.directory) }
+        // Opening a directory that LaunchServices treats as a package launches it, so
+        // only a folder known not to be a package is opened; anything else is revealed.
+        if (try? runner.directory.resourceValues(forKeys: [.isPackageKey]).isPackage) == false {
+            NSWorkspace.shared.open(runner.directory)
+        } else { NSWorkspace.shared.activateFileViewerSelecting([runner.directory]) }
     }
     func openGitHub(_ runner: InstalledRunner) { if let url = runner.remoteURL { openServerLink(url) } }
     func openJob(_ job: RunnerJob) {
