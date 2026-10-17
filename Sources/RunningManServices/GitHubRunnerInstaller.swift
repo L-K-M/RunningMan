@@ -112,7 +112,12 @@ public actor GitHubRunnerInstaller {
             if !request.labels.isEmpty { arguments += ["--labels", request.labels.joined(separator: ",")] }
             _ = try await checked(executor, ProcessRequest(executable: "/bin/bash", arguments: arguments, directory: destination,
                 environment: ["ACTIONS_RUNNER_INPUT_TOKEN": token], timeout: 150, secrets: [token]), operation: "Register GitHub runner")
-            if !request.labels.isEmpty { try GitHubLabelSidecar.write(request.labels, to: destination) }
+            // The labels are advisory local metadata. GitHub already accepted the runner,
+            // so a failed write must not abandon the setup halfway.
+            if !request.labels.isEmpty {
+                do { try GitHubLabelSidecar.write(request.labels, to: destination) }
+                catch { progress("The runner labels could not be saved locally; queue matching will infer them.") }
+            }
             let metadata = try runnerMetadata(at: destination)
             var runner = InstalledRunner(name: metadata["agentName"] as? String ?? request.name, directory: destination,
                                          githubURL: scope.url, agentID: metadata["agentId"] as? Int,
@@ -152,7 +157,7 @@ public actor GitHubRunnerInstaller {
             throw RunnerServiceError("Runner names must use 1–64 letters, numbers, dots, underscores, or hyphens.")
         }
         guard GitHubLabelSidecar.isValid(request.labels) else {
-            throw RunnerServiceError("Use at most 100 nonempty labels without commas or newlines.")
+            throw RunnerServiceError("Use at most 100 nonempty labels of up to 256 characters each, without commas or newlines, and at most 16 KB in total.")
         }
     }
     private func validateDestination(_ url: URL) throws {

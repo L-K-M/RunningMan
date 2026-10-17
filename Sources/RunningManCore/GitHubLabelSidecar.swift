@@ -12,13 +12,18 @@ public enum GitHubLabelSidecar {
     }
 
     /// The label rules RunningMan applies before passing labels to `config.sh --labels`.
+    /// They include the sidecar's size, so a set accepted before registration can
+    /// always be recorded after it.
     public static func isValid(_ labels: [String]) -> Bool {
-        labels.count <= 100 && labels.allSatisfy { !$0.isEmpty && $0.count <= 256 && !$0.contains(",") && !$0.contains("\n") && !$0.contains("\r") }
+        guard labels.count <= 100,
+              labels.allSatisfy({ !$0.isEmpty && $0.count <= 256 && !$0.contains(",") && !$0.contains("\n") && !$0.contains("\r") }),
+              let data = try? JSONEncoder().encode(Contents(labels: labels)) else { return false }
+        return data.count <= sizeLimit
     }
 
     public static func write(_ labels: [String], to directory: URL) throws {
+        guard isValid(labels) else { throw InvalidLabels() }
         let data = try JSONEncoder().encode(Contents(labels: labels))
-        guard isValid(labels), data.count <= sizeLimit else { throw InvalidLabels() }
         let file = directory.appendingPathComponent(fileName)
         try data.write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)

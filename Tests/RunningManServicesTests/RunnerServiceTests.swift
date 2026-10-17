@@ -361,6 +361,22 @@ final class InstallerFlowTests: XCTestCase {
         let discovered = await RunnerDiscovery(homeDirectory: home).discover(additionalDirectories: [root])
         XCTAssertEqual(discovered.runners.first { $0.directory.path == root.path }?.labels, ["local-mac-release"])
     }
+    func testLabelsThatCannotBeRecordedAreRefusedBeforeRegistration() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-installer-tests-" + UUID().uuidString).resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let executor = InstallerExecutor(home: home)
+        // Each label passes the per-label rules, but together they exceed the sidecar's size.
+        let labels = (0..<100).map { String(format: "%03d", $0) + String(repeating: "x", count: 253) }
+        do {
+            _ = try await GitHubRunnerInstaller(homeDirectory: home, executor: executor).create(CreateRunnerRequest(
+                githubURL: URL(string: "https://github.com/example/project")!, name: "created", labels: labels, directory: home.appendingPathComponent("created"))) { _ in }
+            XCTFail("Expected the label set to be refused")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("16 KB"), error.localizedDescription) }
+        let commands = await executor.recorded()
+        XCTAssertTrue(commands.isEmpty, "Nothing is downloaded or registered for labels that could not be recorded")
+        XCTAssertTrue(GitHubLabelSidecar.isValid(Array(labels.prefix(40))))
+    }
     func testRegistrationFailurePreservesPartialInstallationAndRedactsToken() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("runningman-installer-tests-" + UUID().uuidString).resolvingSymlinksInPath()
         defer { try? FileManager.default.removeItem(at: home) }
