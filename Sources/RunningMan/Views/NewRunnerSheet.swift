@@ -95,7 +95,7 @@ struct NewRunnerSheet: View {
                 HStack(spacing: 8) {
                     if model.isCreating { ProgressView().controlSize(.small) }
                     Text(model.creationProgress).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                        .lineLimit(3).truncationMode(.middle).textSelection(.enabled).help(model.creationProgress)
+                        .lineLimit(3).textSelection(.enabled).help(model.creationProgress)
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 Button(model.isCreating || submitting ? "Creating runner…" : "Create & start runner") { create() }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(model.isCreating || checkingConnection || submitting)

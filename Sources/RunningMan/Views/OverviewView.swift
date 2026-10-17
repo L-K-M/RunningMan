@@ -98,7 +98,7 @@ struct OverviewView: View {
         let queue = model.fleetQueue
         var details: [String] = []
         if attention > 0 { details.append("\(attention) \(attention == 1 ? "needs" : "need") attention") }
-        if draining > 0 { details.append("\(draining) stopping when idle") }
+        if draining > 0 { details.append("\(draining) \(draining == 1 ? "runner" : "runners") stopping when idle") }
         if queue.hasQueueEvidence, queue.queuedCount > 0 {
             details.append("\(queue.queuedCount)\(queue.isIncomplete ? "+" : "") compatible \(queue.queuedCount == 1 ? "job" : "jobs") queued")
         }
