@@ -19,6 +19,7 @@ The preview above uses fictional runners and jobs.
 - **Job history.** Search and filter locally recorded jobs, see outcomes and durations, and jump to their GitHub run when its URL is available.
 - **Live diagnostics.** Search and follow redacted logs, reveal installations in Finder, and export a diagnostic report.
 - **Menu-bar access.** Check the fleet and manage runners even after closing the main window.
+- **Notifications.** Opt in to a notification when a job fails or succeeds, or when a runner stops without you stopping it. Click one to open that runner.
 - **Keep builds awake.** Optionally prevent idle sleep while a job is running. Closing the lid can still put a laptop to sleep.
 
 RunningMan is an independent personal project. It uses SwiftUI and AppKit, with no third-party dependencies.

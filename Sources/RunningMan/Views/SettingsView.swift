@@ -18,6 +18,14 @@ struct SettingsView: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             } header: { Text("Monitoring") }
             Section {
+                Toggle("Notify when a job fails", isOn: $model.notificationPreferences.jobFailures)
+                Toggle("Notify when a job succeeds", isOn: $model.notificationPreferences.jobSuccesses)
+                Toggle("Notify when a runner stops unexpectedly", isOn: $model.notificationPreferences.unexpectedStops)
+                Text("Covers jobs that finish while RunningMan is open; cancelled jobs count as failures. A stop is unexpected when you did not start, stop or change that runner in RunningMan during the previous 30 seconds.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                notificationStatus
+            } header: { Text("Notifications") }
+            Section {
                 LabeledContent("GitHub account") {
                     HStack {
                         Text(model.githubAccount ?? "Not checked").foregroundStyle(.secondary)
@@ -84,6 +92,31 @@ struct SettingsView: View {
                 }
             }
         }.formStyle(.grouped).frame(width: 560, height: 660)
+        // Permission can change in System Settings while this window stays open.
+        .task { await model.refreshNotificationAuthorization() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.refreshNotificationAuthorization() }
+        }
+    }
+
+    @ViewBuilder private var notificationStatus: some View {
+        switch model.notificationAuthorization {
+        case .authorized:
+            EmptyView()
+        case .notDetermined:
+            Text("macOS asks for permission the first time you turn one on.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        case .denied:
+            HStack {
+                Label("Notifications are off in System Settings.", systemImage: "bell.slash")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+                Spacer()
+                Button("Open System Settings") { model.openNotificationSettings() }.controlSize(.small)
+            }
+        case .unavailable:
+            Text(model.demoMode ? "This preview workspace never sends notifications." : "Notifications are available when RunningMan runs as an installed app.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        }
     }
 }
 

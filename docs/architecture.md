@@ -77,10 +77,16 @@ History merges retain confirmed completion results and enrich names, repositorie
 
 History has a 2,000-job and 6 MiB encoded limit. Activity has a 500-event limit and stable logical identities, so reparsing historical diagnostics after app relaunch does not duplicate activity. Both are private local files written atomically. Clearing saved history does not remove runner diagnostics.
 
+## Notifications
+
+Notifications are opt-in per kind and off by default. A pure Core planner compares each refresh's runners and jobs with the previous refresh. A job notifies only when a record that was unfinished (or not yet seen) now has a completion time after monitoring started and within the last 15 minutes, so reparsing existing logs at launch or after clearing saved history stays quiet. Cancelled jobs follow the failure preference; unknown outcomes never notify. A runner notifies when a previously live process is positively observed stopped or disabled and you did not act on it in RunningMan in the previous 30 seconds; actions in flight and stop-after-job requests count as your action. Transitions to an unverified state, or from one without a live process, never notify. A bounded in-memory key set deduplicates notifications.
+
+The app posts only when it runs from an app bundle, because the notification center traps without one, and never in demo mode or snapshot captures. Notification text uses already redacted history and discovery values and is redacted again. Clicking a notification selects its runner.
+
 ## Verification
 
 Core and service tests use synthetic metadata, diagnostic lines, fake command executors and temporary home directories. They must not start, stop, disable or unregister a real runner.
 
-App-model tests cover busy/unknown-job confirmation, demo isolation, in-memory GitHub/Forgejo creation and activity deduplication across relaunch. Core and service fixtures cover credential-free discovery, multi-slot reconciliation, observation gaps, scope/label matching, partial API coverage, request limits, Keychain origin boundaries and fresh interruption guards. Preview screenshots exercise real SwiftUI views with synthetic data, including light/dark workload views. They validate rendering, not a real release or live Forgejo registration.
+App-model tests cover busy/unknown-job confirmation, demo isolation, in-memory GitHub/Forgejo creation and activity deduplication across relaunch. Core and service fixtures cover credential-free discovery, multi-slot reconciliation, observation gaps, scope/label matching, partial API coverage, request limits, Keychain origin boundaries, fresh interruption guards and notification planning from synthetic transitions. Preview screenshots exercise real SwiftUI views with synthetic data, including light/dark workload views. They validate rendering, not a real release or live Forgejo registration.
 
 Real-machine discovery can be inspected read-only. Actual GitHub registration and control of installed runners happen only through an explicit user operation in the app.

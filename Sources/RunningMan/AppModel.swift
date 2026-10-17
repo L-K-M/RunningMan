@@ -74,6 +74,15 @@ final class AppModel {
             updateSleepPrevention()
         }
     }
+    /// Never persisted in demo mode. Turning a kind on asks macOS for permission if it has not asked yet.
+    var notificationPreferences: NotificationPreferences {
+        didSet {
+            guard notificationPreferences != oldValue else { return }
+            if !demoMode { Self.save(notificationPreferences) }
+            if notificationPreferences.isAnyEnabled { Task { await requestNotificationAuthorization() } }
+        }
+    }
+    var notificationAuthorization = NotificationAuthorization.unavailable
 
     @ObservationIgnored private let discovery = RunnerDiscovery(systemDaemonsDirectory: RunnerDiscovery.systemDaemonsDirectory)
     @ObservationIgnored private let logs = RunnerLogMonitor()
@@ -95,6 +104,12 @@ final class AppModel {
     @ObservationIgnored private var logTails: [String: String] = [:]
     @ObservationIgnored private var importedDirectories: [URL] = []
     @ObservationIgnored private var observedEventKeys: Set<ActivityIdentity> = []
+    @ObservationIgnored private let notifier: Notifier
+    /// Jobs that finished before this date were reparsed from existing logs and never notify.
+    @ObservationIgnored private let monitoringStartedAt = Date()
+    @ObservationIgnored private var recentUserActions: [String: Date] = [:]
+    @ObservationIgnored private var notifiedKeys: Set<String> = []
+    @ObservationIgnored private var notifiedKeyOrder: [String] = []
     @ObservationIgnored var showMainWindow: (() -> Void)?
 
     static var supportDirectory: URL {
@@ -104,6 +119,8 @@ final class AppModel {
 
     init(demoMode: Bool = CommandLine.arguments.contains("--demo")) {
         self.demoMode = demoMode
+        notifier = Notifier(isActive: !demoMode && !CommandLine.arguments.contains("--snapshot-dir"))
+        notificationPreferences = demoMode ? NotificationPreferences() : Self.storedNotificationPreferences()
         history = RunnerHistoryStore(fileURL: Self.supportDirectory.appendingPathComponent("jobs.json"))
         eventStore = ActivityStore(url: Self.supportDirectory.appendingPathComponent("activity.json"))
         activitySamples = RunnerActivityStore(fileURL: Self.supportDirectory.appendingPathComponent("observed-activity.json"))
@@ -119,6 +136,12 @@ final class AppModel {
             defaultForgejoServer = preferences.string(forKey: "defaultForgejoServer") ?? forgejoServers.first?.absoluteString ?? ""
             importedDirectories = (preferences.stringArray(forKey: "importedRunnerDirectories") ?? [])
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
+        }
+        notifier.openRunner = { [weak self] runnerID in
+            guard let self else { return }
+            selectedRunnerID = runnerID
+            section = .runners
+            showMainWindow?()
         }
     }
 
@@ -179,6 +202,7 @@ final class AppModel {
         if demoMode { lastUpdated = Date(); return }
         isRefreshing = true
         defer { isRefreshing = false }
+        let previousRunners = runners, previousJobs = jobs
         let result = await discovery.discover(additionalDirectories: importedDirectories)
         let states = await controller.snapshots(for: result.runners, allowRemoteActivity: remoteMonitoringEnabled)
         async let githubScan = logs.scan(runners: result.runners.filter { $0.provider == .github })
@@ -227,6 +251,7 @@ final class AppModel {
         if let id = selectedRunnerID, !runners.contains(where: { $0.id == id }) { selectedRunnerID = runners.first?.id }
         updateSelectedLog()
         lastUpdated = Date()
+        postNotifications(previousRunners: previousRunners, previousJobs: previousJobs)
         updateSleepPrevention()
         if remoteMonitoringEnabled && !isRefreshingWorkload {
             Task { [weak self] in await self?.refreshWorkload() }
@@ -322,7 +347,7 @@ final class AppModel {
         if demoMode { simulate(action, runner: runner); return }
         busyRunnerIDs.insert(runner.id)
         Task {
-            defer { busyRunnerIDs.remove(runner.id) }
+            defer { busyRunnerIDs.remove(runner.id); noteUserAction(on: runner.id) }
             do {
                 switch action {
                 case .start: try await controller.start(runner.runner)
@@ -360,7 +385,7 @@ final class AppModel {
         guard !busyRunnerIDs.contains(runner.id) else { return }
         busyRunnerIDs.insert(runner.id)
         Task {
-            defer { busyRunnerIDs.remove(runner.id) }
+            defer { busyRunnerIDs.remove(runner.id); noteUserAction(on: runner.id) }
             do {
                 try await controller.setStartsAtLogin(enabled, for: runner.runner)
                 record(title: enabled ? "Start at login enabled" : "Start at login disabled",
@@ -632,6 +657,60 @@ final class AppModel {
         if events.count > 500 { events = Array(events.prefix(500)) }
         if observedEventKeys.count > 2_000 { observedEventKeys = Set(events.map(ActivityIdentity.init)) }
         if !demoMode { Task { await eventStore.append(event) } }
+    }
+
+    func refreshNotificationAuthorization() async {
+        notificationAuthorization = await notifier.authorization()
+    }
+    func requestNotificationAuthorization() async {
+        notificationAuthorization = await notifier.requestAuthorization()
+    }
+    func openNotificationSettings() { Notifier.openSystemSettings() }
+
+    private enum NotificationKey {
+        static let jobFailures = "notifications.jobFailures"
+        static let jobSuccesses = "notifications.jobSuccesses"
+        static let unexpectedStops = "notifications.unexpectedStops"
+    }
+    private static func storedNotificationPreferences() -> NotificationPreferences {
+        let defaults = UserDefaults.standard
+        return NotificationPreferences(jobFailures: defaults.bool(forKey: NotificationKey.jobFailures),
+                                       jobSuccesses: defaults.bool(forKey: NotificationKey.jobSuccesses),
+                                       unexpectedStops: defaults.bool(forKey: NotificationKey.unexpectedStops))
+    }
+    private static func save(_ preferences: NotificationPreferences) {
+        let defaults = UserDefaults.standard
+        defaults.set(preferences.jobFailures, forKey: NotificationKey.jobFailures)
+        defaults.set(preferences.jobSuccesses, forKey: NotificationKey.jobSuccesses)
+        defaults.set(preferences.unexpectedStops, forKey: NotificationKey.unexpectedStops)
+    }
+
+    /// A runner stays in `busyRunnerIDs` while its action runs; this covers the grace period after it.
+    private func noteUserAction(on runnerID: String) {
+        let now = Date()
+        recentUserActions = recentUserActions.filter { now.timeIntervalSince($0.value) < NotificationPlanner.userActionGrace }
+        recentUserActions[runnerID] = now
+    }
+
+    /// Runs after a refresh has replaced `runners` and `jobs`, comparing them with the state before it.
+    private func postNotifications(previousRunners: [RunnerSnapshot], previousJobs: [RunnerJob]) {
+        guard notifier.isActive, notificationPreferences.isAnyEnabled else { return }
+        let now = Date()
+        // An action in flight or a pending stop-after-job is the user's own doing.
+        var actions = recentUserActions
+        for id in busyRunnerIDs.union(drainingRunnerIDs) { actions[id] = now }
+        let planned = NotificationPlanner.plan(previousJobs: previousJobs, currentJobs: jobs,
+            previousRunners: previousRunners, currentRunners: runners, recentUserActions: actions,
+            monitoringStartedAt: monitoringStartedAt, alreadyNotified: notifiedKeys,
+            preferences: notificationPreferences, now: now)
+        guard !planned.isEmpty else { return }
+        notifiedKeys.formUnion(planned.map(\.id))
+        notifiedKeyOrder += planned.map(\.id)
+        if notifiedKeyOrder.count > 1_000 {
+            notifiedKeyOrder.removeFirst(notifiedKeyOrder.count - 500)
+            notifiedKeys = Set(notifiedKeyOrder)
+        }
+        notifier.post(planned)
     }
 
     private func updateSleepPrevention() {
