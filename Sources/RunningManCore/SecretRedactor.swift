@@ -22,6 +22,16 @@ public enum SecretRedactor {
         return buffer as String
     }
 
+    /// Redacts only provider token shapes. Safe on encoded JSON, where it backs up per-field
+    /// redaction for fields that are not free text, such as installation paths.
+    public static func redactTokenLiterals(_ text: String) -> String {
+        let buffer = NSMutableString(string: text)
+        for rule in tokenLiteralRules {
+            rule.expression.replaceMatches(in: buffer, range: NSRange(location: 0, length: buffer.length), withTemplate: rule.template)
+        }
+        return buffer as String
+    }
+
     /// Flat objects only, so a block never spans into a sibling and the scan stays linear.
     private static let flatObject = compile(#"\{[^{}]*\}"#)
     private static let secretFlag = compile(#"(?i)\"isSecret\"\s*:\s*true"#)
@@ -38,14 +48,19 @@ public enum SecretRedactor {
 
     // Order matters: whole-value shapes (private keys, URLs, bearer tokens, headers) run before
     // key=value rules, which would otherwise consume only the first word and expose the rest.
-    private static let rules: [Rule] = [
-        Rule(#"(?s)-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----(?:.*?-----END (?:[A-Z ]*PRIVATE KEY)-----|.*$)"#, "[REDACTED PRIVATE KEY]"),
+    /// Provider token shapes. Each matches only `[A-Za-z0-9_.-]` runs, never a quote or a
+    /// backslash, so these rules can also run over encoded JSON without breaking it.
+    private static let tokenLiteralRules: [Rule] = [
         Rule(#"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})\b"#, "[REDACTED]"),
         Rule(#"\bglpat-[A-Za-z0-9_.-]{20,}"#, "[REDACTED]"),
         Rule(#"\bxox[abposr]-[A-Za-z0-9-]{10,}"#, "[REDACTED]"),
         Rule(#"\bnpm_[A-Za-z0-9]{36}\b"#, "[REDACTED]"),
         Rule(#"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"#, "[REDACTED]"),
         Rule(#"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"#, "[REDACTED]"),
+    ]
+    private static let rules: [Rule] = [
+        Rule(#"(?s)-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----(?:.*?-----END (?:[A-Z ]*PRIVATE KEY)-----|.*$)"#, "[REDACTED PRIVATE KEY]"),
+    ] + tokenLiteralRules + [
         // Any scheme, anchored at the literal separator: user:password, or token-only userinfo
         // long enough not to be a login such as git@.
         Rule(#"(://)(?:[^/\s:@]+:[^/\s@]+|[^/\s:@]{16,})@"#, "$1[REDACTED]@"),

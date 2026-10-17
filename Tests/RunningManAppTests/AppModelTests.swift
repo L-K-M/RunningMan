@@ -114,6 +114,18 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(ActivityIdentity(values[0]), ActivityIdentity(repeated))
     }
 
+    func testDiagnosticsReportCatchesTokensInPathsAndLogKeys() throws {
+        // Assembled at runtime so the fixture never looks like a committed credential.
+        let token = "gh" + "p_" + String(repeating: "A1", count: 18)
+        let runner = InstalledRunner(name: "mac", directory: URL(fileURLWithPath: "/synthetic/setup-\(token)/runner"))
+        let data = try AppModel.diagnosticsReportData(generatedAt: Date(timeIntervalSince1970: 1_000),
+            runners: [RunnerSnapshot(runner: runner, status: .idle)], jobs: [], events: [], cleanup: [],
+            logs: [runner.id: "listening"], warnings: [])
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains(token))
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual((report["logs"] as? [String: String])?.values.first, "listening")
+    }
+
     func testDiagnosticsReportRedactsEachFieldOnceAndStaysValidJSON() throws {
         let start = Date(timeIntervalSince1970: 1_000)
         let runner = InstalledRunner(name: "build token=abc", directory: URL(fileURLWithPath: "/synthetic/runner"),

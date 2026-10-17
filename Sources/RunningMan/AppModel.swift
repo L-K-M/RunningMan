@@ -644,7 +644,9 @@ final class AppModel {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        return try encoder.encode(report)
+        // Paths, ids and log keys are not redacted field by field; a token pasted into a folder
+        // name is still caught by the token-only pass, which cannot break the JSON.
+        return Data(SecretRedactor.redactTokenLiterals(String(decoding: try encoder.encode(report), as: UTF8.self)).utf8)
     }
 
     /// Remote links are exported only when they carry nothing redaction would hide.
