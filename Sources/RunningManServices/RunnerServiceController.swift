@@ -40,7 +40,7 @@ struct RunnerProcesses {
             // containing spaces recognisable.
             let daemon = executable.path + " daemon "
             let expected = [daemon + "--config " + configuration.path, daemon + "-c " + configuration.path]
-            return entries.first { expected.contains($0.command) || Self.isDaemon($0.command, of: runner, executable: executable, configuration: configuration) }?.pid
+            return entries.first { expected.contains($0.command) || Self.isDaemon($0.command, executable: executable, configuration: configuration) }?.pid
         }
         return entries.first { $0.command.hasPrefix(runner.directory.path + "/bin/Runner.Listener ") || $0.command == runner.directory.path + "/bin/Runner.Listener" }?.pid
     }
@@ -59,19 +59,16 @@ struct RunnerProcesses {
         }
     }
     /// Accepts every flag order and form ForgejoDaemonCommand accepts. ps does not
-    /// show a process's working directory, so a relative configuration path is
-    /// resolved against the runner directory only when the executable lives there.
-    /// With a shared executable, such as Homebrew's, another runner's daemon
-    /// could otherwise pass as this one and be stopped.
-    private static func isDaemon(_ command: String, of runner: InstalledRunner, executable: URL, configuration: URL) -> Bool {
+    /// show a process's working directory, so only an absolute configuration path
+    /// identifies the daemon: with a relative one, another daemon started elsewhere
+    /// with the same executable would pass as this runner's and be stopped. A
+    /// launchd-managed daemon is still found through its service PID.
+    private static func isDaemon(_ command: String, executable: URL, configuration: URL) -> Bool {
         guard command.hasPrefix(executable.path + " ") else { return false }
         let arguments = command.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-        guard arguments.first == executable.path, let value = ForgejoDaemonCommand.parse(arguments: arguments) else { return false }
-        let candidate: URL
-        if value.hasPrefix("/") { candidate = URL(fileURLWithPath: value) }
-        else if executable.standardizedFileURL.path.hasPrefix(runner.directory.standardizedFileURL.path + "/") { candidate = runner.directory.appendingPathComponent(value) }
-        else { return false }
-        return candidate.standardizedFileURL.path == configuration.standardizedFileURL.path
+        guard arguments.first == executable.path, let value = ForgejoDaemonCommand.parse(arguments: arguments),
+              value.hasPrefix("/") else { return false }
+        return URL(fileURLWithPath: value).standardizedFileURL.path == configuration.standardizedFileURL.path
     }
 }
 

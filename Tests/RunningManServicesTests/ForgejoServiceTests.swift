@@ -276,11 +276,14 @@ final class ForgejoServiceTests: XCTestCase {
         // A shared executable gives no evidence of the daemon's working directory.
         XCTAssertNil(RunnerProcesses("1568 1 /opt/shared/bin/forgejo-runner daemon -c config.yml\n").pid(for: runner))
     }
-    func testDaemonWithRelativeConfigurationResolvesOnlyForOwnedExecutable() {
+    /// ps shows no working directory, so a relative configuration cannot tell this runner's daemon
+    /// from another daemon started elsewhere with the same executable; stopping must not signal it.
+    func testDaemonWithRelativeConfigurationIsNeverMatched() {
         let runner = InstalledRunner(name: "example", directory: URL(fileURLWithPath: "/opt/example"), provider: .forgejo,
             executableURL: URL(fileURLWithPath: "/opt/example/forgejo-runner"), configurationURL: URL(fileURLWithPath: "/opt/example/config.yml"))
-        XCTAssertEqual(RunnerProcesses("1571 1 /opt/example/forgejo-runner --config=config.yml daemon\n").pid(for: runner), 1571)
+        XCTAssertNil(RunnerProcesses("1571 1 /opt/example/forgejo-runner --config=config.yml daemon\n").pid(for: runner))
         XCTAssertNil(RunnerProcesses("1572 1 /opt/example/forgejo-runner daemon -c other.yml\n").pid(for: runner))
+        XCTAssertEqual(RunnerProcesses("1573 1 /opt/example/forgejo-runner daemon --config=/opt/example/config.yml\n").pid(for: runner), 1573)
     }
     private func importedFixture(arguments: [String]? = nil, workingDirectory: Bool = true, keepAlive: Any? = nil) throws -> (InstalledRunner, URL) {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
