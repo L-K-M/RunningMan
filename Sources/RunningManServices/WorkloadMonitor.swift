@@ -14,6 +14,12 @@ public actor WorkloadMonitor {
     private var refreshing = false
     private var nextScopeIndex = 0
     private var requestsRemaining = 40
+    /// Active run states, each listed with one request per repository.
+    private static let githubRunStates = ["queued", "in_progress", "waiting", "pending", "requested"]
+    private static let forgejoRunStates = ["waiting", "running", "blocked"]
+    private static let organizationRepositoryLimit = 8
+    /// Requests an organization's selection leaves for the job lists of active runs.
+    private static let jobListReserve = 3
     private var batchDeadline = Date.distantFuture
     private var githubRetryAfter: Date?
     private var forgejoRetryAfter: [String: Date] = [:]
@@ -223,8 +229,12 @@ public actor WorkloadMonitor {
             // Archived repositories cannot run workflows. GitHub sorts by the latest push;
             // Forgejo's endpoint has no sort parameter, so order its page by update time.
             let active = array.filter { $0["archived"] as? Bool != true }
-            repositories = Array((provider == .github ? active : Self.newestFirst(active)).compactMap { $0["full_name"] as? String }.prefix(8))
-            messages.append("Organization coverage includes up to eight of the most recently \(provider == .github ? "pushed" : "updated") repositories visible to this account; repository access policies and other repositories may hide additional jobs.")
+            // Each repository costs one request per run state before any job list. Select only as
+            // many as the remaining budget covers: a pass the budget stops leaves every count unknown.
+            let perRepository = (provider == .github ? Self.githubRunStates : Self.forgejoRunStates).count
+            let limit = min(Self.organizationRepositoryLimit, max(1, (requestsRemaining - Self.jobListReserve) / perRepository))
+            repositories = Array((provider == .github ? active : Self.newestFirst(active)).compactMap { $0["full_name"] as? String }.prefix(limit))
+            messages.append("Organization coverage includes up to \(limit) of the most recently \(provider == .github ? "pushed" : "updated") repositories visible to this account; repository access policies and other repositories may hide additional jobs.")
             if provider == .forgejo, array.count >= 100 { messages.append("Repository selection considered only the first 100 repositories the server returned.") }
         }
         var allJobs: [WorkloadJob] = []
@@ -327,7 +337,7 @@ public actor WorkloadMonitor {
         var runs: [[String: Any]] = []
         // Query every nonterminal run state. A newest-runs-only query would miss
         // long-lived queued work behind newer completed builds.
-        for status in ["queued", "in_progress", "waiting", "pending", "requested"] {
+        for status in Self.githubRunStates {
             let object = try await github("repos/\(repository)/actions/runs?status=\(status)&per_page=20&page=1")
             guard let dictionary = object as? [String: Any], let page = dictionary["workflow_runs"] as? [[String: Any]] else { throw ForgejoAPIError("GitHub returned an unsupported workflow run list.") }
             runs += page
@@ -366,7 +376,7 @@ public actor WorkloadMonitor {
 
     private func forgejoJobs(repository: String, server: URL, messages: inout [String], truncated: inout Bool) async throws -> [WorkloadJob] {
         var runs: [[String: Any]] = []
-        for status in ["waiting", "running", "blocked"] {
+        for status in Self.forgejoRunStates {
             let object = try await forge("repos/\(repository)/actions/runs?status=\(status)&limit=20&page=1", server: server)
             guard let dictionary = object as? [String: Any], let page = dictionary["workflow_runs"] as? [[String: Any]] else { throw ForgejoAPIError("This Forgejo version does not expose compatible Actions run data.") }
             runs += page

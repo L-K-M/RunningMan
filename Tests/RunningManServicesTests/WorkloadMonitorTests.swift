@@ -175,12 +175,26 @@ final class WorkloadMonitorTests: XCTestCase {
             "orgs/example/repos?type=all&sort=pushed&direction=desc&per_page=100&page=1": try json(list)
         ])
         var local = runner(); local.remoteURL = URL(string: "https://github.com/example")
-        // Eight repositories need 42 requests, so lift the budget to see the whole selection.
+        // The default budget covers seven repositories; a larger one shows the whole selection.
         let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo(), requestBudget: 60).refresh(runners: [local]).scopes[0]
         let calls = await fake.requested()
         let checked = Set(calls.compactMap { path in names.first { path.hasPrefix("repos/\($0)/") } })
         XCTAssertEqual(checked, Set(names[1...8]), "Archived repositories are skipped before the eight-repository cap")
         XCTAssertTrue(scope.message?.contains("most recently pushed") == true)
+    }
+    func testIdleOrganizationWithinTheDefaultBudgetIsAKnownZero() async throws {
+        let names = (1...10).map { "example/repo-\($0)" }
+        let fake = QueueExecutor(responses: [
+            "orgs/example/actions/runners?per_page=100&page=1": #"{"runners":[{"id":9,"labels":[{"name":"macOS"}]}]}"#,
+            "orgs/example/repos?type=all&sort=pushed&direction=desc&per_page=100&page=1": try json(names.map { ["full_name": $0] })
+        ])
+        var local = runner(); local.remoteURL = URL(string: "https://github.com/example")
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo()).refresh(runners: [local]).scopes[0]
+        XCTAssertEqual(scope.queuedCount, 0, scope.message ?? "")
+        XCTAssertFalse(scope.message?.contains("Request budget reached") == true)
+        let calls = await fake.requested()
+        XCTAssertEqual(Set(calls.compactMap { path in names.first { path.hasPrefix("repos/\($0)/") } }), Set(names[0..<7]))
+        XCTAssertTrue(scope.message?.contains("up to 7 of the most recently pushed") == true)
     }
     func testForgejoOrganizationQueuesPreferRecentlyUpdatedRepositories() async throws {
         var list: [[String: Any]] = (1...9).map { ["full_name": "example/repo-\($0)", "updated_at": String(format: "2026-01-%02dT00:00:00Z", $0)] }
@@ -204,13 +218,17 @@ final class WorkloadMonitorTests: XCTestCase {
         let fake = QueueExecutor(responses: [
             "orgs/example/actions/runners?per_page=100&page=1": #"{"runners":[{"id":9,"labels":[{"name":"macOS"}]}]}"#,
             "orgs/example/repos?type=all&sort=pushed&direction=desc&per_page=100&page=1": #"[{"full_name":"example/one"},{"full_name":"example/two"},{"full_name":"example/three"}]"#,
-            "repos/example/one/actions/runs?status=queued&per_page=20&page=1": #"{"total_count":1,"workflow_runs":[{"id":11}]}"#,
-            "repos/example/one/actions/runs/11/jobs?per_page=100&page=1&filter=latest": #"{"total_count":1,"jobs":[{"id":1,"name":"Mac","status":"queued","labels":["macOS"]}]}"#
+            "repos/example/one/actions/runs?status=queued&per_page=20&page=1": #"{"total_count":4,"workflow_runs":[{"id":11},{"id":12},{"id":13},{"id":14}]}"#,
+            "repos/example/one/actions/runs/11/jobs?per_page=100&page=1&filter=latest": #"{"total_count":1,"jobs":[{"id":1,"name":"Mac","status":"queued","labels":["macOS"]}]}"#,
+            "repos/example/one/actions/runs/12/jobs?per_page=100&page=1&filter=latest": #"{"total_count":0,"jobs":[]}"#,
+            "repos/example/one/actions/runs/13/jobs?per_page=100&page=1&filter=latest": #"{"total_count":0,"jobs":[]}"#,
+            "repos/example/one/actions/runs/14/jobs?per_page=100&page=1&filter=latest": #"{"total_count":0,"jobs":[]}"#
         ])
         var local = runner(); local.remoteURL = URL(string: "https://github.com/example")
-        // Runner list, repositories, five run states and one job list for the first
-        // repository, then one run state of the second before the budget runs out.
-        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo(), requestBudget: 9).refresh(runners: [local]).scopes[0]
+        // Runner list and repositories leave 13 requests, enough to select two repositories.
+        // The first one's five run states and four job lists then leave only four of the
+        // second's five run states before the budget runs out.
+        let scope = await WorkloadMonitor(executor: fake, forgejo: QueueForgejo(), requestBudget: 15).refresh(runners: [local]).scopes[0]
         XCTAssertEqual(scope.state, .partial)
         XCTAssertEqual(scope.jobs.map(\.name), ["Mac"])
         XCTAssertNil(scope.queuedCount, "Repositories skipped by the stop may hold more queued jobs")
