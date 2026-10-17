@@ -161,7 +161,7 @@ final class RunnerServiceTests: XCTestCase {
     func testStopReportsListenerThatKeepsRunning() async throws {
         let fake = FakeExecutor()
         await fake.configure(processes: "777 1 \(runner.directory.path)/bin/Runner.Listener run\n")
-        let controller = RunnerServiceController(homeDirectory: home, executor: fake)
+        let controller = RunnerServiceController(homeDirectory: home, executor: fake, stopExitTimeout: 0.5)
         do { try await controller.stop(runner); XCTFail("A listener that survives stopping must not be reported as stopped") }
         catch { XCTAssertTrue(error.localizedDescription.contains("still running"), error.localizedDescription) }
     }

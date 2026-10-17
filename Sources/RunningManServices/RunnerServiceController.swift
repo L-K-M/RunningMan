@@ -81,6 +81,9 @@ public actor RunnerServiceController {
     private let githubCLIOverride: String?
     private let userID: UInt32
     private let forgejoAPI: any ForgejoAPIRequesting
+    /// How long a stop waits for the listener to exit. A busy listener cancels its job
+    /// before exiting, which can take several seconds after the signal.
+    private let stopExitTimeout: TimeInterval
     private struct ForgejoStateCache { var status: RunnerStatus; var expires: Date }
     private var forgejoStateCache: [String: ForgejoStateCache] = [:]
     private var domain: String { "gui/\(userID)" }
@@ -88,9 +91,12 @@ public actor RunnerServiceController {
 
     public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser, forgejoAPI: any ForgejoAPIRequesting = ForgejoAPIClient()) {
         self.homeDirectory = homeDirectory.standardizedFileURL; self.executor = SystemProcessExecutor(); self.userID = getuid(); self.githubCLIOverride = nil; self.forgejoAPI = forgejoAPI
+        self.stopExitTimeout = Self.defaultStopExitTimeout
     }
-    init(homeDirectory: URL, executor: any ProcessExecuting, userID: UInt32 = getuid(), githubCLIPath: String = "/usr/bin/gh", forgejoAPI: any ForgejoAPIRequesting = ForgejoAPIClient()) {
+    init(homeDirectory: URL, executor: any ProcessExecuting, userID: UInt32 = getuid(), githubCLIPath: String = "/usr/bin/gh", forgejoAPI: any ForgejoAPIRequesting = ForgejoAPIClient(),
+         stopExitTimeout: TimeInterval = defaultStopExitTimeout) {
         self.homeDirectory = homeDirectory.standardizedFileURL; self.executor = executor; self.userID = userID; self.githubCLIOverride = githubCLIPath; self.forgejoAPI = forgejoAPI
+        self.stopExitTimeout = stopExitTimeout
     }
 
     public func snapshots(for runners: [InstalledRunner], allowRemoteActivity: Bool = true) async -> [RunnerSnapshot] {
@@ -184,23 +190,26 @@ public actor RunnerServiceController {
         let result = try await executor.run(termination)
         guard result.status != 0 || result.timedOut || result.truncated else { try await waitForExit(of: runner); return }
         // The process can exit on its own between the snapshot and the signal, so a
-        // failed signal is an error only while the process is still present.
-        do { try await waitForExit(of: runner) }
-        catch { _ = try requireSuccess(result, of: termination, operation: "Stop manually started runner"); throw error }
+        // failed signal is an error only while the process is still present. Nothing
+        // was signalled, so there is no shutdown to wait for.
+        let remaining = try await checked(executor, Self.processListRequest, operation: "Verify the runner stopped")
+        guard RunnerProcesses(remaining.output).pid(for: runner) != nil else { return }
+        _ = try requireSuccess(result, of: termination, operation: "Stop manually started runner")
     }
     /// A signal does not prove the runner exited, and another supervisor may start
     /// it again. Poll briefly so a surviving process is never reported as stopped.
     private func waitForExit(of runner: InstalledRunner) async throws {
-        for _ in 0..<Self.exitPollAttempts {
-            try await Task.sleep(nanoseconds: Self.exitPollInterval)
+        let attempts = max(1, Int((stopExitTimeout / Self.exitPollInterval).rounded(.up)))
+        for _ in 0..<attempts {
+            try await Task.sleep(nanoseconds: UInt64(Self.exitPollInterval * 1_000_000_000))
             let processes = try await checked(executor, Self.processListRequest, operation: "Verify the runner stopped")
             if RunnerProcesses(processes.output).pid(for: runner) == nil { return }
         }
         throw RunnerServiceError("The runner process is still running after the stop request. It may still be shutting down, or another service restarted it. Refresh to check its state.")
     }
     private static let processListRequest = ProcessRequest(executable: "/bin/ps", arguments: ["-ww", "-axo", "pid=,ppid=,command="])
-    private static let exitPollAttempts = 8
-    private static let exitPollInterval: UInt64 = 250_000_000
+    static let defaultStopExitTimeout: TimeInterval = 10
+    private static let exitPollInterval: TimeInterval = 0.25
 
     public func setEnabled(_ enabled: Bool, for runner: InstalledRunner, force: Bool = false) async throws {
         try validateRunner(runner)
