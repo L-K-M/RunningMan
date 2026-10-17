@@ -20,7 +20,9 @@ Read README.md and docs/architecture.md. This is an independent native macOS app
 Release tags are annotated `vX.Y.Z` tags on `main`, cut with
 `scripts/release.sh`. There is no version in the sources to bump: the tag is
 the marketing version (`RUNNINGMAN_VERSION` at build time); the bundle build
-number is the commit count. The release workflow verifies the tag shape and
+number is the commit count unless `RUNNINGMAN_BUILD_NUMBER` overrides it (a
+checkout without git history builds with 0; the release workflow requires the
+full history). The release workflow verifies the tag shape and
 `CFBundleShortVersionString`, requires an annotated tag on `main`, reruns the
 tests, and refuses to announce drafts, prereleases, non-version tags or
 builds whose preview smoke test did not pass (the assets are still
