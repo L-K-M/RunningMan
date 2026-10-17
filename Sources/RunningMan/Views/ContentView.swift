@@ -66,15 +66,8 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "figure.run.circle.fill")
-                    .font(.system(size: 30)).symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, RunningManStyle.accent)
-                Text("RunningMan").font(.system(size: 16, weight: .bold, design: .rounded))
-            }.padding(.horizontal, 17).padding(.top, 22).padding(.bottom, 26)
-
             Text("WORKSPACE").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(.secondary)
-                .padding(.horizontal, 20).padding(.bottom, 9)
+                .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 9)
             ForEach(AppSection.allCases) { section in
                 Button {
                     model.section = section
