@@ -1,7 +1,7 @@
 name: Release
 
 # A pushed v* tag (scripts/release.sh) or a published GitHub release builds the
-# universal app and attaches RunningMan-v<version>.zip plus its SHA-256; when
+# universal app and attaches RunningMan-v<version>-macos-universal.zip plus its SHA-256; when
 # only the tag exists, the release is created first. A second job then
 # announces the release in the public update manifest (runningman/latest.json
 # in ajila-tg-app-updates) that installed apps check once a day; it never moves
@@ -118,8 +118,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          name="RunningMan-$(printf '%s' "$TAG" | tr -c 'A-Za-z0-9._-' '-').zip"
-          mv dist/RunningMan.zip "$RUNNER_TEMP/$name"
+          name="RunningMan-$(printf '%s' "$TAG" | tr -c 'A-Za-z0-9._-' '-')-macos-universal.zip"
+          mv dist/RunningMan-macos-universal.zip "$RUNNER_TEMP/$name"
           (cd "$RUNNER_TEMP" && shasum -a 256 "$name" > "$name.sha256")
           gh release upload "$TAG" "$RUNNER_TEMP/$name" "$RUNNER_TEMP/$name.sha256" --clobber --repo "$GITHUB_REPOSITORY"
 
