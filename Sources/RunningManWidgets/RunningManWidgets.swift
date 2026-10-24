@@ -16,14 +16,24 @@ private struct RunnerStatsWidget: Widget {
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind.identifier, provider: StatsProvider()) { entry in
-            RunnerWidgetView(kind: kind, snapshot: entry.snapshot, date: entry.date)
-                .containerBackground(.background, for: .widget)
+            StatsContent(kind: kind, entry: entry)
         }
         .configurationDisplayName(Text(kind.title))
         .description(Text(kind == .fleet
             ? "Online, busy and stopped runners on this Mac, from RunningMan’s latest snapshot."
             : "Recorded job outcomes and success rate from available local history."))
         .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
+private struct StatsContent: View {
+    @Environment(\.widgetFamily) private var family
+    let kind: RunnerWidgetKind
+    let entry: StatsEntry
+
+    var body: some View {
+        RunnerWidgetView(kind: kind, snapshot: entry.snapshot, date: entry.date, family: family)
+            .containerBackground(.background, for: .widget)
     }
 }
 

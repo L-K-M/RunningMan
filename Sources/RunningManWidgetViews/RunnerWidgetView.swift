@@ -4,15 +4,16 @@ import WidgetKit
 
 /// Shared with the isolated screenshot gallery, so smoke tests render the shipped views.
 public struct RunnerWidgetView: View {
-    @Environment(\.widgetFamily) private var family
+    private let family: WidgetFamily
     private let kind: RunnerWidgetKind
     private let snapshot: WidgetSnapshot?
     private let date: Date
 
-    public init(kind: RunnerWidgetKind, snapshot: WidgetSnapshot?, date: Date) {
+    public init(kind: RunnerWidgetKind, snapshot: WidgetSnapshot?, date: Date, family: WidgetFamily) {
         self.kind = kind
         self.snapshot = snapshot
         self.date = date
+        self.family = family
     }
 
     public var body: some View {
@@ -130,8 +131,7 @@ public struct WidgetPreviewGallery: View {
     }
 
     private func card(kind: RunnerWidgetKind, snapshot: WidgetSnapshot?, family: WidgetFamily) -> some View {
-        RunnerWidgetView(kind: kind, snapshot: snapshot, date: date)
-            .environment(\.widgetFamily, family)
+        RunnerWidgetView(kind: kind, snapshot: snapshot, date: date, family: family)
             .padding(16)
             .frame(width: family == .systemSmall ? 170 : 360, height: 170)
             .background(.background, in: RoundedRectangle(cornerRadius: 20))
