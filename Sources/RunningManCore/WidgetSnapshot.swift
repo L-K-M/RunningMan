@@ -122,8 +122,8 @@ public actor WidgetSnapshotStore {
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
-        let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-        guard values.isDirectory == true, values.isSymbolicLink != true else { throw SnapshotError.invalid }
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        guard attributes[.type] as? FileAttributeType == .typeDirectory else { throw SnapshotError.invalid }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
         let data = try encoder.encode(snapshot)
@@ -141,10 +141,15 @@ public actor WidgetSnapshotStore {
     }
 
     public func load() throws -> WidgetSnapshot? {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
-        let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-        guard values.isRegularFile == true, values.isSymbolicLink != true,
-              let data = try SavedStoreFile.contents(of: fileURL, limit: Self.byteLimit) else { throw SnapshotError.invalid }
+        // Use the existing no-follow reader: URL resource metadata can stay cached
+        // after a regular file is replaced by a link, and a separate check races.
+        let file: DiagnosticLogFile
+        do { file = try DiagnosticLogFile.open(fileURL) }
+        catch DiagnosticLogFile.OpenError.missing { return nil }
+        defer { try? file.handle.close() }
+        guard file.size <= Self.byteLimit else { throw SnapshotError.invalid }
+        let data = try file.handle.read(upToCount: Self.byteLimit + 1) ?? Data()
+        guard data.count <= Self.byteLimit else { throw SnapshotError.invalid }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
         let snapshot = try decoder.decode(WidgetSnapshot.self, from: data)
