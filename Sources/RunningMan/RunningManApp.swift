@@ -196,7 +196,7 @@ private struct WindowIdentity: NSViewRepresentable {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls where model?.openWidget(url) == true {
-            pendingWidgetOpen = true
+            pendingWidgetOpen = openWindow == nil
             showMainWindow()
         }
     }

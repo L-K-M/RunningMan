@@ -6,24 +6,28 @@ import WidgetKit
 @main
 struct RunningManWidgets: WidgetBundle {
     var body: some Widget {
-        RunnerStatsWidget(kind: .fleet)
-        RunnerStatsWidget(kind: .jobs)
+        FleetWidget()
+        JobResultsWidget()
     }
 }
 
-private struct RunnerStatsWidget: Widget {
-    let kind: RunnerWidgetKind
+private struct FleetWidget: Widget {
+    var body: some WidgetConfiguration { statsConfiguration(for: .fleet) }
+}
 
-    var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind.identifier, provider: StatsProvider()) { entry in
-            StatsContent(kind: kind, entry: entry)
-        }
-        .configurationDisplayName(Text(kind.title))
-        .description(Text(kind == .fleet
-            ? "Online, busy and stopped runners on this Mac, from RunningMan’s latest snapshot."
-            : "Recorded job outcomes and success rate from available local history."))
-        .supportedFamilies([.systemSmall, .systemMedium])
+private struct JobResultsWidget: Widget {
+    var body: some WidgetConfiguration { statsConfiguration(for: .jobs) }
+}
+
+@MainActor private func statsConfiguration(for kind: RunnerWidgetKind) -> some WidgetConfiguration {
+    StaticConfiguration(kind: kind.identifier, provider: StatsProvider()) { entry in
+        StatsContent(kind: kind, entry: entry)
     }
+    .configurationDisplayName(Text(kind.title))
+    .description(Text(kind == .fleet
+        ? "Online, busy and stopped runners on this Mac, from RunningMan’s latest snapshot."
+        : "Recorded job outcomes and success rate from available local history."))
+    .supportedFamilies([.systemSmall, .systemMedium])
 }
 
 private struct StatsContent: View {
