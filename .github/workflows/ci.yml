@@ -36,6 +36,16 @@ jobs:
       - name: Check architectures
         run: |
           lipo "dist/RunningMan.app/Contents/MacOS/RunningMan" -verify_arch arm64 x86_64
+          lipo "dist/RunningMan.app/Contents/PlugIns/RunningManWidgets.appex/Contents/MacOS/RunningManWidgets" -verify_arch arm64 x86_64
+      - name: Check widget registration
+        run: |
+          widget="$PWD/dist/RunningMan.app/Contents/PlugIns/RunningManWidgets.appex"
+          pluginkit -a "$widget"
+          registration="$(pluginkit -m -A -D -v -i ch.lkmc.RunningMan.Widgets)"
+          case "$registration" in
+            *"ch.lkmc.RunningMan.Widgets"*) printf '%s\n' "$registration" ;;
+            *) echo "Widget extension was not registered." >&2; exit 1 ;;
+          esac
       - name: Render isolated preview
         # Blocking, because the release workflow runs the same step. The script
         # fails after two minutes if the capture stalls; this is a backstop.

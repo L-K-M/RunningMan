@@ -1,6 +1,7 @@
 import AppKit
 import ScreenCaptureKit
 import SwiftUI
+import RunningManWidgetViews
 
 @main
 struct RunningManApp: App {
@@ -170,6 +171,7 @@ private struct WindowIdentity: NSViewRepresentable {
     /// From the latest scene to appear (main window or menu bar panel); it can
     /// reopen the main window after it was closed.
     private var openWindow: OpenWindowAction?
+    private var pendingWidgetOpen = false
 
     /// Monitoring and update checks start here rather than in the main window's
     /// onAppear: the window is not always presented at launch (state restoration,
@@ -186,6 +188,17 @@ private struct WindowIdentity: NSViewRepresentable {
 
     func sceneAppeared(openWindow: OpenWindowAction) {
         self.openWindow = openWindow
+        if pendingWidgetOpen {
+            pendingWidgetOpen = false
+            showMainWindow()
+        }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where model?.openWidget(url) == true {
+            pendingWidgetOpen = true
+            showMainWindow()
+        }
     }
 
     /// Before any scene has handed over openWindow, this still brings an existing
@@ -264,6 +277,7 @@ private struct WindowIdentity: NSViewRepresentable {
             model.section = .cleanup
             try await Task.sleep(for: .milliseconds(650))
             try await capture(name: "cleanup-dark", directory: directory)
+            try await captureWidgets(directory: directory)
             NSApp.terminate(nil)
         } catch {
             FileHandle.standardError.write(Data("Snapshot failed: \(error.localizedDescription)\n".utf8))
@@ -275,6 +289,29 @@ private struct WindowIdentity: NSViewRepresentable {
         guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "RunningManMain" }) else {
             throw SnapshotError.windowUnavailable
         }
+        try await capture(window: window, name: name, directory: directory)
+    }
+
+    private static func captureWidgets(directory: URL) async throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 594, height: 660),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "RunningMan widget previews"
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        for (name, appearance, scheme) in [("widgets", NSAppearance.Name.aqua, ColorScheme.light),
+                                           ("widgets-dark", .darkAqua, .dark)] {
+            NSApp.appearance = NSAppearance(named: appearance)
+            let host = NSHostingView(rootView: WidgetPreviewGallery().preferredColorScheme(scheme))
+            window.contentView = host
+            window.setContentSize(host.fittingSize)
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+            try await Task.sleep(for: .milliseconds(650))
+            try await capture(window: window, name: name, directory: directory)
+        }
+    }
+
+    private static func capture(window: NSWindow, name: String, directory: URL) async throws {
         let image = try await composited(window)
         guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
             throw SnapshotError.encodingFailed

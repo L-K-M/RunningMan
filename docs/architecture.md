@@ -1,12 +1,14 @@
 # Architecture
 
-RunningMan has three Swift package targets:
+RunningMan has five Swift package targets:
 
 | Target | Responsibility |
 | --- | --- |
 | RunningManCore | Foundation-only models, bounded installation discovery, incremental diagnostics parsing, history reconciliation and credential redaction. |
 | RunningManServices | Owned subprocess execution, user launchd service management, GitHub/Forgejo installation and remote workload APIs. |
 | RunningMan | SwiftUI/AppKit windows and menu-bar view, observed application model, user confirmations, activity persistence and diagnostics export. |
+| RunningManWidgetViews | SwiftUI widget content shared by the extension and isolated screenshot previews. |
+| RunningManWidgets | Read-only WidgetKit timeline provider and Runner Fleet / Job Results widgets. |
 
 ## Discovery and live state
 
@@ -80,6 +82,31 @@ History merges retain confirmed completion results and enrich names, repositorie
 History has a 2,000-job and 6 MiB encoded limit. Activity has a 500-event limit and stable logical identities, so reparsing historical diagnostics after app relaunch does not duplicate activity. Both are private local files written atomically. Clearing saved history does not remove runner diagnostics.
 
 A history or observed-activity file that cannot be decoded is renamed beside the original as `<name>.invalid-<yyyyMMdd-HHmmss>.json`, never deleted, and that store starts empty. An outcome value this build does not know, for example from a newer build, reads as unknown. Individual invalid history records are left out after the original file is copied aside the same way, and Activity reports a history recovery once. Overlapping observed intervals from older builds or clock corrections are clamped instead of counted twice, and observation resumes once a corrected clock passes the saved coverage.
+
+## Desktop widgets
+
+The app publishes `WidgetSnapshot` after a completed refresh. It contains counts
+and the observation time only. Online and attention rules live in Core so widgets
+and the dashboard agree, including live Forgejo daemons with unverified activity.
+Job success rate uses confirmed success/failure/cancellation outcomes from bounded
+local history; unknown and unfinished jobs do not enter its denominator.
+
+An actor writes `Widgets/stats.json` atomically under the app's support directory,
+with private file permissions. Changed counts are saved promptly; unchanged
+freshness checkpoints happen at most once a minute. Timeline invalidations for
+changed figures are limited to once per five minutes. The provider requests a new
+snapshot every 15 minutes and schedules an explicit stale entry at the current
+snapshot's expiry, so quitting the app cannot leave counts presented as fresh.
+Missing, invalid, unsupported, oversized and linked files are unavailable. Demo
+mode and screenshot captures never publish snapshots or invalidate live widgets.
+
+`build-app.sh` builds and embeds the `.appex`, signs it before the host, and verifies
+nested signatures. Only the extension is sandboxed. Since distribution is ad-hoc
+signed without provisioned App Groups, its home-relative read-only sandbox
+exception grants access solely to `Library/Application Support/RunningMan/Widgets/`.
+No network, subprocess, runner-file or credential access is granted. The host
+remains unsandboxed for its existing launchd responsibilities. Widget URLs accept
+only navigation to Overview and Job history.
 
 ## Notifications
 
