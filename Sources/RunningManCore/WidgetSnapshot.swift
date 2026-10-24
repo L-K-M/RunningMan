@@ -124,6 +124,8 @@ public actor WidgetSnapshotStore {
                                                 attributes: [.posixPermissions: 0o700])
         let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
         guard attributes[.type] as? FileAttributeType == .typeDirectory else { throw SnapshotError.invalid }
+        // Creation attributes do not tighten a directory that already exists.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
         let data = try encoder.encode(snapshot)

@@ -9,7 +9,8 @@ timeout_seconds=120
 mkdir -p "$output"
 # These files are owned by this smoke test. Remove prior captures so a
 # preview failure cannot accidentally pass using an earlier successful run.
-for name in overview runners workload history cleanup overview-dark workload-dark cleanup-dark widgets widgets-dark; do
+capture_names=(overview runners workload history cleanup overview-dark workload-dark cleanup-dark widgets widgets-dark)
+for name in "${capture_names[@]}"; do
   rm -f "$output/$name.png"
 done
 # The directory is passed through the environment, not as an argument: a bare
@@ -28,7 +29,7 @@ while kill -0 "$pid" 2>/dev/null; do
 done
 wait "$pid"
 captures=()
-for name in overview runners workload history cleanup overview-dark workload-dark cleanup-dark widgets widgets-dark; do
+for name in "${capture_names[@]}"; do
   test -s "$output/$name.png"
   captures+=("$output/$name.png")
 done

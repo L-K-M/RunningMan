@@ -88,6 +88,25 @@ final class WidgetSnapshotTests: XCTestCase {
         XCTAssertFalse(oldReload)
         let latest = try await store.load()
         XCTAssertEqual(latest, due, "An older async publication must not overwrite a newer snapshot")
+
+        let checkpoint = WidgetSnapshot(runners: [runner(.busy)], jobs: [], updatedAt: date.addingTimeInterval(6 * 60))
+        let checkpointReload = try await store.publish(checkpoint)
+        XCTAssertFalse(checkpointReload, "Freshness alone does not invalidate the timeline")
+        let checkpointSaved = try await store.load()
+        XCTAssertEqual(checkpointSaved, checkpoint, "An unchanged snapshot still advances its observation time")
+    }
+
+    func testPublisherSecuresAnExistingSnapshotDirectory() async throws {
+        let home = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = WidgetSnapshotStore.fileURL(homeDirectory: home)
+        let directory = file.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+
+        _ = try await WidgetSnapshotStore(fileURL: file).publish(.example(at: date))
+        let permissions = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int
+        XCTAssertEqual(permissions, 0o700)
     }
 
     func testStoreRejectsMalformedOversizedAndLinkedSnapshotsWithoutChangingThem() async throws {
