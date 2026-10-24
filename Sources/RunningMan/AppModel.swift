@@ -4,6 +4,7 @@ import Observation
 import RunningManCore
 import RunningManServices
 import UniformTypeIdentifiers
+import WidgetKit
 
 enum AppSection: String, CaseIterable, Identifiable {
     case overview, runners, workload, history, cleanup
@@ -197,6 +198,8 @@ final class AppModel {
     @ObservationIgnored private let history: RunnerHistoryStore
     @ObservationIgnored private let eventStore: ActivityStore
     @ObservationIgnored private let activitySamples: RunnerActivityStore
+    @ObservationIgnored private let widgetSnapshots: WidgetSnapshotStore?
+    @ObservationIgnored private var widgetPublishError: String?
     /// Nil in demo mode, which must not write preferences.
     @ObservationIgnored private let drainRequestStore: DrainRequestStore?
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
@@ -241,7 +244,7 @@ final class AppModel {
             .appendingPathComponent("RunningMan", isDirectory: true)
     }
 
-    init(demoMode: Bool = CommandLine.arguments.contains("--demo")) {
+    init(demoMode: Bool = CommandLine.arguments.contains("--demo"), widgetSnapshotURL: URL? = nil) {
         self.demoMode = demoMode
         // One credential store and API client, so a token read from Keychain or saved
         // by Connect is shared by status checks, queue monitoring and runner setup.
@@ -257,6 +260,8 @@ final class AppModel {
         history = RunnerHistoryStore(fileURL: Self.supportDirectory.appendingPathComponent("jobs.json"))
         eventStore = ActivityStore(url: Self.supportDirectory.appendingPathComponent("activity.json"))
         activitySamples = RunnerActivityStore(fileURL: Self.supportDirectory.appendingPathComponent("observed-activity.json"))
+        widgetSnapshots = demoMode || SnapshotCapture.destination != nil ? nil : WidgetSnapshotStore(
+            fileURL: widgetSnapshotURL ?? WidgetSnapshotStore.fileURL(homeDirectory: FileManager.default.homeDirectoryForCurrentUser))
         drainRequestStore = demoMode ? nil : DrainRequestStore(defaults: .standard)
         if demoMode {
             remoteMonitoringEnabled = true
@@ -335,6 +340,15 @@ final class AppModel {
     var successRate: Double? {
         completedJobCount == 0 ? nil : Double(successfulJobs) / Double(completedJobCount)
     }
+
+    /// Widget links only navigate. Arbitrary runner-control URLs are not accepted.
+    @discardableResult
+    func openWidget(_ url: URL) -> Bool {
+        guard let kind = RunnerWidgetKind.allCases.first(where: { $0.url == url }) else { return false }
+        section = kind == .fleet ? .overview : .history
+        return true
+    }
+
     /// Newest first.
     func jobs(for runnerID: String) -> [RunnerJob] { jobsByRunner[runnerID] ?? [] }
     func jobCount(for runnerID: String) -> Int { jobsByRunner[runnerID]?.count ?? 0 }
@@ -476,8 +490,24 @@ final class AppModel {
         refreshUsageIfStale()
         postNotifications(previousRunners: previousRunners, previousJobs: previousJobs, requestedStops: previousDraining)
         updateSleepPrevention()
+        await publishWidgetSnapshot()
         if remoteMonitoringEnabled && !isRefreshingWorkload {
             Task { [weak self] in await self?.refreshWorkload() }
+        }
+    }
+
+    private func publishWidgetSnapshot() async {
+        guard let widgetSnapshots, let lastUpdated else { return }
+        let snapshot = WidgetSnapshot(runners: runners, jobs: jobs, updatedAt: lastUpdated)
+        do {
+            if try await widgetSnapshots.publish(snapshot) {
+                for kind in RunnerWidgetKind.allCases { WidgetCenter.shared.reloadTimelines(ofKind: kind.identifier) }
+            }
+            widgetPublishError = nil
+        } catch {
+            let message = Self.message(error)
+            if widgetPublishError != message { record(title: "Could not update desktop widgets", detail: message, kind: .warning) }
+            widgetPublishError = message
         }
     }
 
@@ -986,7 +1016,12 @@ final class AppModel {
     }
     private func clearHistoryConfirmed() {
         Task {
-            do { if !demoMode { try await history.clear() }; jobs = []; record(title: "Saved job history cleared") }
+            do {
+                if !demoMode { try await history.clear() }
+                jobs = []
+                record(title: "Saved job history cleared")
+                await publishWidgetSnapshot()
+            }
             catch { errorMessage = Self.message(error) }
         }
     }
@@ -1437,20 +1472,6 @@ final class AppModel {
 }
 
 extension RunnerSnapshot {
-    /// The runner process is alive, with or without a job.
-    var isOnline: Bool { status.isRunning || processID != nil }
-
-    /// A state RunningMan could not read, or one that needs a person. A running Forgejo
-    /// daemon whose job activity is unverified (no API access, or server monitoring off)
-    /// is unknown by design rather than at fault, so it does not count.
-    var needsAttention: Bool {
-        switch status {
-        case .attention: return true
-        case .unknown: return !(runner.provider == .forgejo && processID != nil)
-        case .idle, .busy, .stopped, .disabled: return false
-        }
-    }
-
     fileprivate var menuBarRank: Int {
         if needsAttention { return 0 }
         switch status {

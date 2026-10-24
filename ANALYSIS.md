@@ -631,7 +631,7 @@ FEAT-1 (notifications) is in PR #17; its remaining extras are APP-21.
 **FEAT-25 release-job.swift drops Git LFS content and submodules** (Low, S) [V]
 - Fail `prepare` explicitly when `.gitmodules` or `filter=lfs` is present (opt-in support later), and document it.
 
-Researched and deferred: Spotlight, Quick Look, widgets and App Intents need app extensions or metadata processing that a SwiftPM-only build does not produce; revisit if the build moves to an Xcode project (a `runningman://` scheme covers basic automation). An in-app updater would need a manifest contract change in the canonical ajila-tg-app-updates script first and must deliberately set the quarantine attribute.
+Desktop widgets now ship as a SwiftPM-built extension embedded by `build-app.sh`, with `runningman://` links to Overview and Job history. Spotlight, Quick Look and App Intents remain deferred. An in-app updater would need a manifest contract change in the canonical ajila-tg-app-updates script first and must deliberately set the quarantine attribute.
 
 ---
 
@@ -683,7 +683,7 @@ From the review:
 - sec-16 "non-exclusive token file create": not exploitable (fresh 0700 directory).
 - sec-17 "nothing helps verify downloads": `.sha256` assets exist.
 - svc-07 "pipe handler spins at 100% CPU": refuted (the wrapper keeps the pipes open until exit); only a close-versus-handler race remained, addressed by PR #8.
-- Spotlight, Quick Look, widgets and App Intents: deferred, see section 9.
+- Spotlight, Quick Look and App Intents: deferred, see section 9.
 
 From pull request reviews (do not re-raise without new evidence):
 - PR #12: "the worker job id survives the large-file tail jump and misattributes results". Each GitHub `Worker_` log belongs to exactly one job; keeping its id is what lets the tail's result finish that job (comment added).

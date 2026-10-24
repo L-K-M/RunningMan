@@ -216,13 +216,19 @@ private struct WorkloadScopeCard: View {
         }
     }
     private var countsKnown: Bool { scope.compatibleQueuedJobs != nil }
+
+    // Keep the optional title expression out of the view builder's type-checking budget.
+    private var scopeHeading: String {
+        scope.scopeTitle.map { $0 + " · " + (scope.scopeURL.host ?? "") }
+            ?? scope.scopeURL.host.map { $0 + scope.scopeURL.path } ?? scope.scopeURL.absoluteString
+    }
+
     var body: some View {
         Surface {
             HStack(alignment: .top, spacing: 14) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(scope.provider.title.uppercased()).font(.system(size: 10, weight: .bold)).tracking(1).foregroundStyle(RunningManStyle.accentText)
-                    Button(scope.scopeTitle.map { $0 + " · " + (scope.scopeURL.host ?? "") }
-                        ?? scope.scopeURL.host.map { $0 + scope.scopeURL.path } ?? scope.scopeURL.absoluteString) { model.openServerLink(scope.scopeURL) }
+                    Button(scopeHeading) { model.openServerLink(scope.scopeURL) }
                         .buttonStyle(.plain).font(.system(size: 13, weight: .semibold)).lineLimit(2)
                 }
                 Spacer()

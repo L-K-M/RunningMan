@@ -149,6 +149,20 @@ public struct RunnerSnapshot: Identifiable, Hashable, Sendable {
     public var isEnabled: Bool
     public var currentJob: RunnerJob?
     public var detail: String?
+
+    /// The runner process is alive, with or without a job.
+    public var isOnline: Bool { status.isRunning || processID != nil }
+
+    /// A live Forgejo daemon without remote activity evidence is unverified by
+    /// design, rather than at fault. Share this rule with the desktop widgets.
+    public var needsAttention: Bool {
+        switch status {
+        case .attention: return true
+        case .unknown: return !(runner.provider == .forgejo && processID != nil)
+        case .idle, .busy, .stopped, .disabled: return false
+        }
+    }
+
     public init(runner: InstalledRunner, status: RunnerStatus = .unknown, processID: Int32? = nil,
                 startsAtLogin: Bool = false, isEnabled: Bool = true, currentJob: RunnerJob? = nil,
                 detail: String? = nil) {

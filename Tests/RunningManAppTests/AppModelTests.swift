@@ -5,6 +5,33 @@ import RunningManServices
 @testable import RunningMan
 
 final class AppModelTests: XCTestCase {
+    @MainActor func testDemoNeverPublishesWidgetSnapshots() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = WidgetSnapshotStore.fileURL(homeDirectory: directory)
+        let model = AppModel(demoMode: true, widgetSnapshotURL: file)
+        await model.refresh()
+        model.clearHistory()
+        model.confirmPendingAction()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    @MainActor func testWidgetLinksOnlyNavigateToOverviewAndHistory() {
+        let model = AppModel(demoMode: true)
+        model.section = .runners
+        XCTAssertTrue(model.openWidget(RunnerWidgetKind.fleet.url))
+        XCTAssertEqual(model.section, .overview)
+        XCTAssertTrue(model.openWidget(RunnerWidgetKind.jobs.url))
+        XCTAssertEqual(model.section, .history)
+        let runners = model.runners
+        for text in ["runningman://stop", "runningman://history?delete=true", "https://history", "runningman://overview/path"] {
+            XCTAssertFalse(model.openWidget(URL(string: text)!))
+            XCTAssertEqual(model.section, .history)
+            XCTAssertEqual(model.runners, runners)
+        }
+    }
+
     @MainActor func testNotificationsKeepBackgroundRefreshWithAutomaticRefreshOff() {
         let model = AppModel(demoMode: true)
         model.refreshAutomatically = false

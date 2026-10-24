@@ -24,6 +24,7 @@ The preview above uses fictional runners and jobs.
 - **Job log.** Follow a GitHub runner's current job step by step, like the log on GitHub, read from the runner's local files with secrets redacted.
 - **Live diagnostics.** Search and follow redacted logs, reveal installations in Finder, and export a diagnostic report.
 - **Menu-bar access.** Check the fleet and manage runners even after closing the main window.
+- **Desktop widgets.** See runner availability and recorded job results in small or medium widgets.
 - **Notifications.** Opt in to a notification when a job fails or succeeds, or when a runner stops without you stopping it. Click one to open that runner.
 - **Keep builds awake.** Optionally prevent idle sleep while a job is running. Closing the lid can still put a laptop to sleep.
 
@@ -125,6 +126,27 @@ Repository and organization scans are bounded and disclose partial access or ins
 
 **Busy while observed** is an estimate from consecutive known idle/busy samples while RunningMan is monitoring. It shows the covered time explicitly; app downtime, uncertain activity and gaps over 15 seconds are excluded. It measures whether at least one job was active, not CPU load or the percentage of occupied slots on a multi-job runner. Up to 48 hours of bounded observations are stored privately; the view covers the last 24 hours. Recorded-job counts and median durations come separately from available local job history, which can be incomplete for Forgejo.
 
+## Desktop widgets
+
+After copying RunningMan to Applications, open it once. Control-click the desktop,
+choose **Edit Widgets**, then search for **RunningMan**. Both widgets support small
+and medium sizes:
+
+- **Runner Fleet:** online, busy and attention counts; the medium size also shows
+  stopped and disabled runners. Unverified activity stays labelled separately.
+- **Job Results:** success rate and locally recorded jobs; the medium size adds
+  succeeded, failed, cancelled and unknown outcomes. Success rate uses confirmed
+  success, failure and cancellation outcomes, matching the dashboard.
+
+Click a widget to open Overview or Job history. Keep RunningMan open for new
+snapshots. macOS schedules widget updates, so they can lag behind the app. After
+15 minutes without a fresh snapshot, the widget labels its counts as cached and
+asks you to open the app. Missing or unreadable data shows **Stats unavailable**.
+
+The widget reads only aggregate counts from
+**~/Library/Application Support/RunningMan/Widgets/stats.json**. It never reads
+runner files, credentials, names or logs. Preview mode does not update this file.
+
 ## History and privacy
 
 The **Cleanup** section reads reports written by participating release workflows. Each release builds in its own temporary source copy and removes that copy after upload attempts, including ordinary build or upload failures. The runner's configuration, diagnostic logs, development checkouts and shared tool caches remain outside that scope. Cleanup failure is reported separately from release upload success.
@@ -149,7 +171,7 @@ scripts/smoke-test.sh
 
 `scripts/build.sh` also accepts `--universal`, `--zip`, `--run`, `--install` (replaces `/Applications/RunningMan.app`) and `--clean`. To cut a release, run `scripts/release.sh 1.2.0` on a clean, pushed `main` (`--dry-run` checks first): it updates the marked download link above, commits, tags `v1.2.0` and pushes both, after which the release workflow builds and publishes the zip and announces it to installed apps.
 
-The smoke test opens a clearly labelled synthetic preview workspace and saves eight screenshots under **.local/screenshots/**, including light/dark workload and cleanup views, and fails if a section comes out blank. It captures only RunningMan's own window, so it needs macOS 14.4 or later but no Screen Recording permission. It never controls installed runners or changes your saved window layout. You can explore that preview manually:
+The smoke test opens a clearly labelled synthetic preview workspace and saves ten screenshots under **.local/screenshots/**, including light/dark workload, cleanup and widget views, and fails if a section comes out blank. It captures only RunningMan's own windows, so it needs macOS 14.4 or later but no Screen Recording permission. It never controls installed runners or changes your saved window layout. You can explore that preview manually:
 
 ~~~sh
 open -na dist/RunningMan.app --args --demo

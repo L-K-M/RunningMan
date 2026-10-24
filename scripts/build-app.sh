@@ -15,9 +15,10 @@ for argument in "$@"; do
   esac
 done
 
-build_arguments=(--package-path "$project_root" -c "$configuration" --product RunningMan)
+build_arguments=(--package-path "$project_root" -c "$configuration")
 if $universal; then build_arguments+=(--arch arm64 --arch x86_64); fi
-swift build "${build_arguments[@]}"
+swift build "${build_arguments[@]}" --product RunningMan
+swift build "${build_arguments[@]}" --product RunningManWidgets
 binary_directory="$(swift build "${build_arguments[@]}" --show-bin-path)"
 output_directory="$project_root/dist"
 app="$output_directory/RunningMan.app"
@@ -44,6 +45,9 @@ case "$build_number" in *[!0-9]*|"") echo "git returned an invalid commit count:
 rm -rf "$app" "$output_directory"/RunningMan-macos-*.zip "$output_directory"/RunningMan-macos-*.zip.sha256 "$output_directory"/RunningMan.zip "$output_directory"/RunningMan.zip.sha256
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary_directory/RunningMan" "$app/Contents/MacOS/RunningMan"
+widget="$app/Contents/PlugIns/RunningManWidgets.appex"
+mkdir -p "$widget/Contents/MacOS"
+cp "$binary_directory/RunningManWidgets" "$widget/Contents/MacOS/RunningManWidgets"
 
 # Rebuild from the canonical PNG so a stale tracked ICNS never hides new artwork.
 swift "$project_root/scripts/make-icon.swift" "$app/Contents/Resources"
@@ -65,11 +69,37 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticTermination</key><false/>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>CFBundleURLTypes</key><array><dict>
+    <key>CFBundleURLName</key><string>ch.lkmc.RunningMan.widgets</string>
+    <key>CFBundleURLSchemes</key><array><string>runningman</string></array>
+    <key>CFBundleTypeRole</key><string>Viewer</string>
+  </dict></array>
+</dict></plist>
+PLIST
+cat > "$widget/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>ch.lkmc.RunningMan.Widgets</string>
+  <key>CFBundleName</key><string>RunningManWidgets</string>
+  <key>CFBundleDisplayName</key><string>RunningMan</string>
+  <key>CFBundleExecutable</key><string>RunningManWidgets</string>
+  <key>CFBundlePackageType</key><string>XPC!</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
+  <key>CFBundleVersion</key><string>$build_number</string>
+  <key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>NSExtension</key><dict>
+    <key>NSExtensionPointIdentifier</key><string>com.apple.widgetkit-extension</string>
+  </dict>
 </dict></plist>
 PLIST
 plutil -lint "$app/Contents/Info.plist"
+plutil -lint "$widget/Contents/Info.plist"
+# Sign nested code first. Only the widget is sandboxed; the host manages launchd.
+codesign --force --sign - --entitlements "$project_root/Resources/RunningManWidgets.entitlements" "$widget"
 codesign --force --sign - "$app"
-codesign --verify --strict "$app"
+codesign --verify --deep --strict "$app"
 if $zip_app; then
   ditto -c -k --keepParent "$app" "$output_directory/RunningMan-macos-$arch_tag.zip"
   (cd "$output_directory" && shasum -a 256 "RunningMan-macos-$arch_tag.zip" > "RunningMan-macos-$arch_tag.zip.sha256")
