@@ -20,6 +20,17 @@ Read README.md and docs/architecture.md. This is an independent native macOS app
   `io.github.l-k-m.RunningMan.forgejo.*` prefix remain managed
   (`ManagedServiceLabel` in RunnerServiceController.swift owns the list).
 
+## Licensing
+
+- RunningMan's own code is under the Unlicense (`LICENSE`).
+  `scripts/build-app.sh` copies it into `Contents/Resources/LICENSE`; CI and
+  the release workflow fail when the app or its zip lacks an identical copy.
+- The app links only Apple system frameworks. Before adding a package,
+  vendored file or bundled asset (fonts, images, icons, data), confirm its
+  license allows redistribution in the app, ship its notices in
+  `Contents/Resources` as `Third-Party-Notices.txt`, and check that file with
+  `test -s` in both workflows.
+
 ## Releases
 
 Release tags are annotated `vX.Y.Z` tags on `main`, cut with
