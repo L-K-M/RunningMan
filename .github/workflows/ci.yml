@@ -33,6 +33,12 @@ jobs:
         run: swift test
       - name: Build universal app
         run: scripts/build-app.sh --universal --zip
+      - name: Check bundled license
+        # build-app.sh copies LICENSE into the app; the uploaded zip must carry it.
+        run: |
+          test -s dist/RunningMan.app/Contents/Resources/LICENSE
+          cmp LICENSE dist/RunningMan.app/Contents/Resources/LICENSE
+          unzip -p dist/RunningMan-macos-universal.zip RunningMan.app/Contents/Resources/LICENSE | cmp - LICENSE
       - name: Check architectures
         run: |
           lipo "dist/RunningMan.app/Contents/MacOS/RunningMan" -verify_arch arm64 x86_64
