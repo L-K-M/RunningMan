@@ -228,12 +228,16 @@ public struct LapProgress: Sendable, Equatable {
     public var isFinished: Bool { outcome != .running }
 
     /// Lays the job's steps over the reference. Steps match by name and occurrence; a step the
-    /// reference lacks gets a zero-length sector after the step before it.
-    public static func make(steps: [JobStep], reference: LapReference?, jobStarted: Date, isFinished: Bool, now: Date) -> LapProgress {
+    /// reference lacks gets a zero-length sector after the step before it. Once the job has
+    /// finished, its own outcome outranks its steps': a step may fail and continue on error, and
+    /// a job may be cancelled between steps.
+    public static func make(steps: [JobStep], reference: LapReference?, jobStarted: Date, isFinished: Bool, jobOutcome: JobOutcome? = nil,
+                            now: Date) -> LapProgress {
         let end = isFinished ? (steps.compactMap(\.finishedAt).max() ?? now) : now
         let elapsed = max(0, end.timeIntervalSince(jobStarted))
+        let reported = isFinished ? Outcome(jobOutcome) : nil
         if let reference, reference.sectors.count == 1, reference.sectors[0].name.isEmpty {
-            return jobLevel(reference: reference, steps: steps, elapsed: elapsed, isFinished: isFinished)
+            return jobLevel(reference: reference, steps: steps, jobStarted: jobStarted, elapsed: elapsed, isFinished: isFinished, reported: reported)
         }
 
         let identifiedSteps = LapReference.identified(steps, name: \.name)
@@ -251,10 +255,14 @@ public struct LapProgress: Sendable, Equatable {
             }
         }
 
+        // Reference steps before the furthest step this run reached are behind it, run or not.
+        let reached = plan.lastIndex { stepsByIdentity[$0.identity] != nil } ?? -1
         var sectors: [Sector] = []
         var start = 0.0, live = 0.0, remaining = 0.0
         var current: Int?, failed: Int?
         var outcome: Outcome = isFinished ? .success : .running
+        // The first failed or cancelled step stops the runner; cleanup after it does not move it.
+        var stopped = false
         for (index, entry) in plan.enumerated() {
             let referenceSeconds = entry.reference?.seconds ?? 0
             var state = SectorState.upcoming
@@ -270,12 +278,12 @@ public struct LapProgress: Sendable, Equatable {
                     switch step.outcome {
                     case .failure, .cancelled:
                         // The runner stops where the job stopped, inside the sector.
-                        live = start + min(seconds, referenceSeconds * runningCap)
+                        if !stopped { live = start + min(seconds, referenceSeconds * runningCap) }
+                        stopped = true
                         if step.outcome == .failure { failed = failed ?? index; outcome = .failure }
                         else if outcome != .failure { outcome = .cancelled }
                     default:
-                        // Cleanup steps after a failure still run, but the runner stays where it fell.
-                        if outcome == .success || outcome == .running { live = start + referenceSeconds }
+                        if !stopped { live = start + referenceSeconds }
                     }
                     if entry.reference != nil, step.outcome == .success {
                         let difference = seconds - referenceSeconds
@@ -289,12 +297,11 @@ public struct LapProgress: Sendable, Equatable {
                     actual = inStep
                     state = .running
                     current = index
-                    // Cleanup steps keep running after a failure; the runner stays where it fell.
-                    if failed == nil, outcome != .cancelled { live = start + min(inStep, referenceSeconds * runningCap) }
+                    if !stopped { live = start + min(inStep, referenceSeconds * runningCap) }
                     remaining += max(referenceSeconds - inStep, referenceSeconds * 0.15)
                     overrun = referenceSeconds > 0 && inStep > referenceSeconds * 1.5 && inStep > referenceSeconds + 15
                 }
-            } else if !isFinished {
+            } else if !isFinished, index > reached {
                 remaining += referenceSeconds
             }
             sectors.append(Sector(id: index, name: entry.identity.name, stepID: step?.id, start: start, reference: referenceSeconds, actual: actual,
@@ -303,6 +310,7 @@ public struct LapProgress: Sendable, Equatable {
             start += referenceSeconds
         }
         let total = start
+        if let reported { outcome = reported }
         // A successful job has crossed the whole track, including sectors it skipped.
         if outcome == .success { live = total }
         return LapProgress(sectors: sectors, total: total, elapsed: elapsed, live: live, ghost: total > 0 ? min(elapsed, total) : 0,
@@ -312,20 +320,41 @@ public struct LapProgress: Sendable, Equatable {
     }
 
     /// Without step times the ghost paces the whole job; the runner holds just short of the line.
-    private static func jobLevel(reference: LapReference, steps: [JobStep], elapsed: Double, isFinished: Bool) -> LapProgress {
+    private static func jobLevel(reference: LapReference, steps: [JobStep], jobStarted: Date, elapsed: Double, isFinished: Bool,
+                                 reported: Outcome?) -> LapProgress {
         let total = reference.total
-        let failed = steps.contains { $0.outcome == .failure }
-        let cancelled = steps.contains { $0.outcome == .cancelled }
-        let outcome: Outcome = !isFinished ? .running : failed ? .failure : cancelled ? .cancelled : .success
-        let live = outcome == .success ? total : min(elapsed, total * runningCap)
-        let sector = Sector(id: 0, name: "", stepID: nil, start: 0, reference: total, actual: elapsed,
-                            state: isFinished ? .finished(outcome == .success ? .success : failed ? .failure : .cancelled) : .running,
-                            split: isFinished && outcome == .success ? elapsed - total : nil,
+        // As with steps, the first failed or cancelled step ends the run while cleanup goes on.
+        let stop = steps.first { $0.outcome == .failure || $0.outcome == .cancelled }
+        let outcome = reported ?? stop.map { $0.outcome == .failure ? .failure : .cancelled } ?? (isFinished ? .success : .running)
+        let stoppedAt = stop?.finishedAt.map { max(0, $0.timeIntervalSince(jobStarted)) } ?? elapsed
+        let live = outcome == .success ? total : min(outcome == .running ? elapsed : stoppedAt, total * runningCap)
+        let state: SectorState
+        switch outcome {
+        case .running: state = .running
+        case .success: state = .finished(.success)
+        case .failure: state = .finished(.failure)
+        case .cancelled: state = .finished(.cancelled)
+        }
+        let sector = Sector(id: 0, name: "", stepID: nil, start: 0, reference: total, actual: elapsed, state: state,
+                            split: outcome == .success ? elapsed - total : nil,
                             isPersonalBest: outcome == .success && (reference.bestTotal.map { elapsed < $0 } ?? false),
-                            isOverrun: !isFinished && elapsed > total * 1.5 && elapsed > total + 15, history: reference.sectors[0].history)
+                            isOverrun: outcome == .running && elapsed > total * 1.5 && elapsed > total + 15, history: reference.sectors[0].history)
         return LapProgress(sectors: [sector], total: total, elapsed: elapsed, live: live, ghost: min(elapsed, total),
-                           lead: elapsed - live, remaining: isFinished ? nil : max(total - elapsed, total * 0.15),
-                           outcome: outcome, currentSector: isFinished ? nil : 0, failedSector: failed ? 0 : nil, reference: reference)
+                           lead: elapsed - live, remaining: outcome == .running ? max(total - elapsed, total * 0.15) : nil,
+                           outcome: outcome, currentSector: outcome == .running ? 0 : nil, failedSector: outcome == .failure ? 0 : nil,
+                           reference: reference)
+    }
+}
+
+extension LapProgress.Outcome {
+    /// The result a finished job reports, when it reports one.
+    init?(_ job: JobOutcome?) {
+        switch job {
+        case .success: self = .success
+        case .failure: self = .failure
+        case .cancelled: self = .cancelled
+        case .running, .unknown, nil: return nil
+        }
     }
 }
 

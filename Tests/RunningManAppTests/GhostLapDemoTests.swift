@@ -58,4 +58,16 @@ final class GhostLapDemoTests: XCTestCase {
         XCTAssertTrue(reference.isWholeJob)
         XCTAssertGreaterThanOrEqual(reference.runs, 1)
     }
+
+    @MainActor func testHistoryFromAnotherProviderDoesNotPaceAJob() throws {
+        let model = AppModel(demoMode: true)
+        model.laps = [:]
+        let job = try XCTUnwrap(model.jobs.first { $0.name == "Unit tests" && $0.outcome == .success })
+        let forgejo = try XCTUnwrap(model.runners.first { $0.runner.provider == .forgejo })
+        XCTAssertEqual(model.lapKey(for: job).provider, .github)
+        for index in model.jobs.indices where model.jobs[index].id != job.id && model.jobs[index].name == job.name {
+            model.jobs[index].runnerID = forgejo.id
+        }
+        XCTAssertNil(model.lapReference(for: job), "A Forgejo run of the same name is a different job")
+    }
 }

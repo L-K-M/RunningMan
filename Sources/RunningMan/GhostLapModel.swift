@@ -14,11 +14,12 @@ extension AppModel {
     /// durations of its earlier successful runs in the job history, which pace the whole job.
     func lapReference(for job: RunnerJob, pace: GhostPace? = nil) -> LapReference? {
         let pace = pace ?? ghostPace
-        let recorded = (laps[lapKey(for: job)] ?? []).filter { $0.jobID != job.id }
+        let key = lapKey(for: job)
+        let recorded = (laps[key] ?? []).filter { $0.jobID != job.id }
         if let reference = LapReference.make(from: recorded, pace: pace) { return reference }
+        // The same key, so a GitHub and a Forgejo job of the same name never pace each other.
         let earlier = jobs.filter {
-            $0.id != job.id && $0.outcome == .success && $0.finishedAt != nil && $0.name == job.name
-                && $0.repository == job.repository && $0.workflow == job.workflow
+            $0.id != job.id && $0.outcome == .success && $0.finishedAt != nil && $0.name == job.name && lapKey(for: $0) == key
         }.map { LapRecord(jobID: $0.id, finishedAt: $0.finishedAt!, outcome: .success, seconds: $0.duration) }
         return LapReference.make(from: earlier, pace: pace)
     }
@@ -37,14 +38,17 @@ extension AppModel {
 
     /// Hands each newly finished step log to the lap book once.
     func recordFinishedLaps() {
+        // Only the latest job of each runner has a step log, so older IDs can never come back.
+        recordedLapJobIDs.formIntersection(stepLogs.values.map(\.jobID))
         for (_, log) in stepLogs where log.isFinished && !recordedLapJobIDs.contains(log.jobID) {
             guard let job = jobs.first(where: { $0.id == log.jobID }), [.success, .failure, .cancelled].contains(job.outcome),
                   let lap = LapRecord(log: log, outcome: job.outcome) else { continue }
             recordedLapJobIDs.insert(log.jobID)
             let key = lapKey(for: job)
             Task { [weak self, lapBook] in
-                let updated = await lapBook.record(lap, for: key)
-                self?.laps[key] = updated
+                // The whole book, so jobs it forgot leave the model too.
+                let book = await lapBook.record(lap, for: key)
+                self?.laps = book
             }
         }
     }
@@ -265,9 +269,9 @@ extension AppModel {
             try? await Task.sleep(for: .seconds(1))
             guard let index = runners.firstIndex(where: { $0.runner.provider == .forgejo && $0.currentJob != nil }),
                   let job = runners[index].currentJob, Date().timeIntervalSince(job.startedAt) > 93 else { continue }
-            let key = lapKey(for: job)
             let finished = Date()
-            laps[key, default: []].append(LapRecord(jobID: job.id, finishedAt: finished, outcome: .success, seconds: finished.timeIntervalSince(job.startedAt)))
+            laps = await lapBook.record(LapRecord(jobID: job.id, finishedAt: finished, outcome: .success, seconds: finished.timeIntervalSince(job.startedAt)),
+                                        for: lapKey(for: job))
             var next = job
             next.id = "demo-forge-\(UUID().uuidString.prefix(8))"
             next.startedAt = finished.addingTimeInterval(6)

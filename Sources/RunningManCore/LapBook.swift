@@ -10,7 +10,7 @@ public actor LapBook {
 
     public static let lapsPerJob = LapReference.historyLimit
     public static let maximumJobs = 300
-    private static let maximumSplits = 80
+    public static let maximumSplits = 80
     private static let maximumFileBytes = 2 * 1024 * 1024
 
     private let fileURL: URL?
@@ -29,7 +29,9 @@ public actor LapBook {
             let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
             if let data = try? SavedStoreFile.contents(of: fileURL, limit: Self.maximumFileBytes),
                let stored = try? decoder.decode([Stored].self, from: data) {
-                for entry in stored { loaded[entry.key] = Array(entry.laps.suffix(Self.lapsPerJob)) }
+                // A decodable file still gets the bounds the book keeps when it writes.
+                for entry in stored { loaded[entry.key, default: []] += entry.laps }
+                loaded = Self.bounded(loaded.mapValues(Self.normalized))
             } else {
                 _ = try? SavedStoreFile.moveAside(fileURL)
             }
@@ -38,26 +40,36 @@ public actor LapBook {
         return loaded
     }
 
-    /// Adds a finished run unless the same job is already recorded, and returns the updated laps of its key.
+    /// Adds a finished run unless the same job is already recorded, and returns the updated book.
     @discardableResult
-    public func record(_ lap: LapRecord, for key: LapKey) -> [LapRecord] {
+    public func record(_ lap: LapRecord, for key: LapKey) -> [LapKey: [LapRecord]] {
         var book = load()
-        var laps = book[key] ?? []
-        guard !laps.contains(where: { $0.jobID == lap.jobID }) else { return laps }
-        var bounded = lap
-        bounded.splits = Array(bounded.splits.prefix(Self.maximumSplits))
-        laps.append(bounded)
-        laps.sort { $0.finishedAt < $1.finishedAt }
-        laps = Array(laps.suffix(Self.lapsPerJob))
-        book[key] = laps
-        if book.count > Self.maximumJobs {
-            // Forget the jobs that ran longest ago.
-            let keep = book.sorted { ($0.value.last?.finishedAt ?? .distantPast) > ($1.value.last?.finishedAt ?? .distantPast) }.prefix(Self.maximumJobs)
-            book = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
-        }
+        let laps = book[key] ?? []
+        guard !laps.contains(where: { $0.jobID == lap.jobID }) else { return book }
+        book[key] = Self.normalized(laps + [lap])
+        book = Self.bounded(book)
         cache = book
         save(book)
-        return laps
+        return book
+    }
+
+    /// One lap per job run, oldest first, at most `lapsPerJob`. A lap with more steps than the book
+    /// keeps is paced as a whole: cutting steps off would make its ghost finish early.
+    private static func normalized(_ laps: [LapRecord]) -> [LapRecord] {
+        var seen: Set<String> = []
+        let unique = laps.filter { seen.insert($0.jobID).inserted }.sorted { $0.finishedAt < $1.finishedAt }
+        return unique.suffix(lapsPerJob).map { lap in
+            var kept = lap
+            if kept.splits.count > maximumSplits { kept.splits = [] }
+            return kept
+        }
+    }
+
+    /// Forgets the jobs that ran longest ago once the book holds more than `maximumJobs`.
+    private static func bounded(_ book: [LapKey: [LapRecord]]) -> [LapKey: [LapRecord]] {
+        guard book.count > maximumJobs else { return book }
+        let keep = book.sorted { ($0.value.last?.finishedAt ?? .distantPast) > ($1.value.last?.finishedAt ?? .distantPast) }.prefix(maximumJobs)
+        return Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
     }
 
     private func save(_ book: [LapKey: [LapRecord]]) {

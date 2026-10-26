@@ -246,7 +246,8 @@ struct LapTrack: View {
     }
 
     static func progress(job: RunnerJob, steps: [JobStep], isFinished: Bool, reference: LapReference?, now: Date) -> LapProgress {
-        LapProgress.make(steps: steps, reference: reference, jobStarted: steps.first?.startedAt ?? job.startedAt, isFinished: isFinished, now: now)
+        LapProgress.make(steps: steps, reference: reference, jobStarted: steps.first?.startedAt ?? job.startedAt, isFinished: isFinished,
+                         jobOutcome: job.outcome, now: now)
     }
 
     static func layout(progress: LapProgress, width: CGFloat, style: Style) -> LapLayout {

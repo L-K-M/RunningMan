@@ -168,7 +168,8 @@ final class GhostLapTests: XCTestCase {
         let key = LapKey(provider: .github, repository: "example/app", workflow: "CI", job: "Build")
         let book = LapBook(fileURL: url)
         for index in 0..<25 { await book.record(lap("run-\(index)", [("Build", Double(30 + index))], at: Double(index)), for: key) }
-        let again = await book.record(lap("run-24", [("Build", 1)], at: 99), for: key)
+        let book24 = await book.record(lap("run-24", [("Build", 1)], at: 99), for: key)
+        let again = try XCTUnwrap(book24[key])
         XCTAssertEqual(again.count, LapBook.lapsPerJob)
         XCTAssertEqual(again.first?.jobID, "run-5")
         XCTAssertEqual(again.last?.splits.first?.seconds, 54, "A repeat of a recorded job is ignored")
@@ -188,5 +189,94 @@ final class GhostLapTests: XCTestCase {
         XCTAssertTrue(loaded.isEmpty)
         let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         XCTAssertTrue(names.contains { $0.hasPrefix("laps.invalid-") }, "\(names)")
+    }
+
+    func testTheJobsOwnOutcomeWinsOverItsSteps() {
+        // A job cancelled between steps never crossed the line, however its steps ended.
+        let cancelled = LapProgress.make(steps: steps([("Set up job", 3, .success), ("Restore cache", 6, .success)]), reference: usualReference,
+                                         jobStarted: start, isFinished: true, jobOutcome: .cancelled, now: start.addingTimeInterval(9))
+        XCTAssertEqual(cancelled.outcome, .cancelled)
+        XCTAssertEqual(cancelled.live, 9, accuracy: 0.001)
+        // A failed step allowed to continue on error leaves the job successful.
+        let continued = LapProgress.make(steps: steps([("Set up job", 3, .success), ("Restore cache", 2, .failure), ("Build", 50, .success)]),
+                                         reference: usualReference, jobStarted: start, isFinished: true, jobOutcome: .success, now: start.addingTimeInterval(55))
+        XCTAssertEqual(continued.outcome, .success)
+        XCTAssertEqual(continued.live, continued.total, accuracy: 0.001)
+        // Until the job's outcome is known, its steps decide.
+        let pending = LapProgress.make(steps: steps([("Set up job", 3, .success), ("Restore cache", 6, .success), ("Build", 50, .success)]),
+                                       reference: usualReference, jobStarted: start, isFinished: true, jobOutcome: .running, now: start.addingTimeInterval(59))
+        XCTAssertEqual(pending.outcome, .success)
+    }
+
+    func testTheRunnerStaysWhereTheJobFirstStopped() {
+        let progress = LapProgress.make(steps: steps([("Set up job", 3, .success), ("Restore cache", 6, .success), ("Build", 20, .failure), ("Post cache", 4, .cancelled)]),
+                                        reference: usualReference, jobStarted: start, isFinished: true, now: start.addingTimeInterval(40))
+        XCTAssertEqual(progress.outcome, .failure)
+        XCTAssertEqual(progress.failedSector, 2)
+        XCTAssertEqual(progress.live, 9 + 20, accuracy: 0.001)
+    }
+
+    func testAReferenceStepTheRunPassedOverLeavesTheEstimate() {
+        // This run restores no cache; once the build runs, that step is behind it.
+        let progress = LapProgress.make(steps: steps([("Set up job", 3, .success), ("Build", nil, .running)]),
+                                        reference: usualReference, jobStarted: start, isFinished: false, now: start.addingTimeInterval(13))
+        XCTAssertEqual(progress.remaining ?? 0, 52 - 10, accuracy: 0.001)
+    }
+
+    func testWholeJobPacingStopsAtAFailureWhileCleanupRuns() throws {
+        let laps = [60.0, 70, 80].enumerated().map { LapRecord(jobID: "\($0)", finishedAt: start.addingTimeInterval(Double($0)), outcome: .success, seconds: $1) }
+        let reference = try XCTUnwrap(LapReference.make(from: laps, pace: .usual))
+        let progress = LapProgress.make(steps: steps([("Set up job", 3, .success), ("Build", 20, .failure), ("Complete job", nil, .running)]),
+                                        reference: reference, jobStarted: start, isFinished: false, now: start.addingTimeInterval(25))
+        XCTAssertEqual(progress.outcome, .failure)
+        XCTAssertEqual(progress.live, 23, accuracy: 0.001)
+        XCTAssertNil(progress.remaining)
+        // Without steps, the job's own outcome still decides the finish.
+        let cancelled = LapProgress.make(steps: [], reference: reference, jobStarted: start, isFinished: true, jobOutcome: .cancelled,
+                                         now: start.addingTimeInterval(30))
+        XCTAssertEqual(cancelled.outcome, .cancelled)
+        XCTAssertFalse(cancelled.sectors[0].isPersonalBest)
+    }
+
+    func testALapWithTooManyStepsIsKeptAsAWholeJob() async throws {
+        let key = LapKey(provider: .github, repository: "example/app", workflow: "CI", job: "Matrix")
+        let long = lap("long", (0..<(LapBook.maximumSplits + 1)).map { ("Step \($0)", 1.0) })
+        let book = await LapBook(fileURL: nil).record(long, for: key)
+        let stored = try XCTUnwrap(book[key]?.first)
+        XCTAssertTrue(stored.splits.isEmpty, "Cutting steps off would make the ghost finish early")
+        XCTAssertEqual(stored.seconds, Double(LapBook.maximumSplits + 1))
+    }
+
+    func testRecordingReturnsTheWholeBookWithinItsBounds() async {
+        let book = LapBook(fileURL: nil)
+        var latest: [LapKey: [LapRecord]] = [:]
+        for index in 0...LapBook.maximumJobs {
+            let key = LapKey(provider: .github, repository: "example/app", workflow: "CI", job: "Job \(index)")
+            latest = await book.record(lap("run-\(index)", [("Build", 3)], at: Double(index)), for: key)
+        }
+        XCTAssertEqual(latest.count, LapBook.maximumJobs)
+        XCTAssertNil(latest[LapKey(provider: .github, repository: "example/app", workflow: "CI", job: "Job 0")], "The job that ran longest ago goes first")
+    }
+
+    func testALoadedLapBookIsDeduplicatedOrderedAndBounded() async throws {
+        struct Entry: Encodable { let key: LapKey; let laps: [LapRecord] }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("lapbook-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("laps.json")
+        let key = LapKey(provider: .github, repository: "example/app", workflow: "CI", job: "Build")
+        let repeated = [lap("b", [("Build", 30)], at: 2), lap("a", [("Build", 31)], at: 1), lap("b", [("Build", 30)], at: 2), lap("b", [("Build", 30)], at: 2)]
+        let long = lap("long", (0..<(LapBook.maximumSplits + 1)).map { ("Step \($0)", 1.0) }, at: 3)
+        var entries = [Entry(key: key, laps: repeated + [long])]
+        for index in 0..<(LapBook.maximumJobs + 5) {
+            entries.append(Entry(key: LapKey(provider: .github, repository: "example/app", workflow: "CI", job: "Job \(index)"),
+                                 laps: [lap("job-\(index)", [("Build", 3)], at: Double(index) - 1_000)]))
+        }
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(entries).write(to: url)
+        let loaded = await LapBook(fileURL: url).load()
+        XCTAssertEqual(loaded[key]?.map(\.jobID), ["a", "b", "long"])
+        XCTAssertEqual(loaded[key]?.last?.splits.isEmpty, true)
+        XCTAssertEqual(loaded.count, LapBook.maximumJobs)
     }
 }
