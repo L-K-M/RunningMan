@@ -9,7 +9,7 @@ import Foundation
 // page that is still present when RunningMan looks.
 
 /// How a job step ended, as the runner's worker log reports it.
-public enum JobStepOutcome: String, Sendable, Equatable {
+public enum JobStepOutcome: String, Codable, Sendable, Equatable {
     case running, success, failure, cancelled, skipped, unknown
 
     init(runnerResult: String) {
