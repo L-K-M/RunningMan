@@ -159,6 +159,13 @@ final class AppModel {
     var logText = ""
     /// Steps and output of each GitHub runner's most recent job, by runner ID.
     var stepLogs: [String: JobStepLog] = [:]
+    /// Finished runs by job, so a new run can race the ghost of earlier ones.
+    var laps: [LapKey: [LapRecord]] = [:]
+    /// Which earlier run the ghost replays, for this session.
+    var ghostPace: GhostPace = .usual
+    var lapSoundsEnabled = true {
+        didSet { if !demoMode { UserDefaults.standard.set(lapSoundsEnabled, forKey: "lapSoundsEnabled") } }
+    }
     var showingNewRunner = false { didSet { if showingNewRunner { showMainWindow?() } } }
     var showingSettings = false
     var errorMessage: String? { didSet { if errorMessage != nil { showMainWindow?() } } }
@@ -210,6 +217,11 @@ final class AppModel {
     @ObservationIgnored private var logTails: [String: String] = [:]
     @ObservationIgnored private var importedDirectories: [URL] = []
     @ObservationIgnored private var observedEventKeys: Set<ActivityIdentity> = []
+    /// Replaced once in demo mode by an in-memory book seeded with the demo's earlier runs.
+    @ObservationIgnored var lapBook: LapBook
+    /// Jobs whose lap was already handed to the lap book, so each finished run is recorded once.
+    @ObservationIgnored var recordedLapJobIDs: Set<String> = []
+    @ObservationIgnored var demoRaceTask: Task<Void, Never>?
     @ObservationIgnored private let refreshes = RefreshCoalescer()
     @ObservationIgnored private var usageComputedAt: Date?
     @ObservationIgnored private var usageCapacities: [String: Int] = [:]
@@ -263,6 +275,7 @@ final class AppModel {
         widgetSnapshots = demoMode || SnapshotCapture.destination != nil ? nil : WidgetSnapshotStore(
             fileURL: widgetSnapshotURL ?? WidgetSnapshotStore.fileURL(homeDirectory: FileManager.default.homeDirectoryForCurrentUser))
         drainRequestStore = demoMode ? nil : DrainRequestStore(defaults: .standard)
+        lapBook = LapBook(fileURL: demoMode ? nil : Self.supportDirectory.appendingPathComponent("laps.json"))
         if demoMode {
             remoteMonitoringEnabled = true
             loadDemo()
@@ -276,6 +289,7 @@ final class AppModel {
             importedDirectories = (preferences.stringArray(forKey: "importedRunnerDirectories") ?? [])
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
             restoreDrainRequests(drainRequestStore?.load() ?? [:])
+            lapSoundsEnabled = preferences.object(forKey: "lapSoundsEnabled") as? Bool ?? true
         }
         notifier.openRunner = { [weak self] runnerID in
             guard let self else { return }
@@ -372,6 +386,7 @@ final class AppModel {
             do { jobs = try await history.load() } catch { warnings = [Self.message(error)] }
             events = await eventStore.load()
             observedEventKeys = Set(events.map(ActivityIdentity.init))
+            laps = await lapBook.load()
             if let notice = await history.takeRecoveryNotice() { record(title: "Could not read all saved job history", detail: notice, kind: .warning) }
             await refresh()
             let clock = ContinuousClock()
@@ -469,6 +484,7 @@ final class AppModel {
         assign(\.warnings, nextWarnings)
         logTails = scan.tails
         updateStepLogs(github.stepLogs)
+        recordFinishedLaps()
         updateSelectedLog()
         for event in scan.events { record(event) }
         for runner in runners {
@@ -1288,6 +1304,8 @@ final class AppModel {
     /// Demo jobs never end on their own, so a busy demo runner with a stop-after-job request finishes
     /// its job successfully after a short pause and then takes the normal idle-stop path.
     private func simulateJobFinish(for runnerID: String) {
+        // The demo race finishes its own run and then honours the request.
+        if demoRaceTask != nil, runnerID == runners.first?.id { return }
         let delay = demoDrainDelay
         Task { [weak self] in
             try? await Task.sleep(for: delay)
@@ -1442,6 +1460,7 @@ final class AppModel {
                 ("Post Run actions/checkout@v4", 1, .success, ["Post job cleanup.", "$ /usr/bin/git version", "git version 2.50.1"]),
                 ("Complete job", 1, .success, ["Cleaning up orphan processes"])
             ])
+        setUpDemoRace(now: Date())
         lastUpdated = Date()
         updateSelectedLog()
     }

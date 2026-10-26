@@ -18,6 +18,9 @@ struct SettingsView: View {
                 Toggle("Keep this Mac awake while a job is running", isOn: $model.keepAwakeWhileBusy)
                 Text("Prevents idle sleep during detected jobs. Closing your MacBook lid can still put it to sleep.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
+                Toggle("Play lap sounds", isOn: $model.lapSoundsEnabled)
+                Text("Quiet ticks as steps finish, a whoosh when a job overtakes its usual pace, and a chime at the finish, only while RunningMan is in front.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             } header: { Text("Monitoring") }
             Section {
                 Toggle("Notify when a job fails", isOn: $model.notificationPreferences.jobFailures)

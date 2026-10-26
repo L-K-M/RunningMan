@@ -86,6 +86,8 @@ private struct MainWindowScene: View {
                         model.mainWindowVisible = window.occlusionState.contains(.visible)
                     }
                 }
+                // The preview workspace races scripted runs in real time; captures stay still.
+                model.startDemoRace()
                 if !snapshotTaskStarted, let directory = SnapshotCapture.destination {
                     snapshotTaskStarted = true
                     Task { await SnapshotCapture.run(model: model, directory: directory) }
