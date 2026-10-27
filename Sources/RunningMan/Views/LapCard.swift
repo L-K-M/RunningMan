@@ -15,11 +15,14 @@ struct LapCard: View {
     @State private var selected: Int?
     @State private var hovered: Int?
     @State private var trackWidth: CGFloat = 0
+    @State private var inspectorHeight: CGFloat = 86
     @FocusState private var trackFocused: Bool
 
     private var log: JobStepLog? { model.stepLogs[snapshot.id].flatMap { $0.jobID == job.id ? $0 : nil } }
     private var steps: [JobStep] { log?.steps ?? [] }
     private var isFinished: Bool { log?.isFinished ?? (job.finishedAt != nil) }
+    /// Forgejo runners keep no local job output, so there is no job log to open.
+    private var hasJobLog: Bool { snapshot.runner.provider == .github }
 
     var body: some View {
         let reference = model.lapReference(for: job)
@@ -38,12 +41,12 @@ struct LapCard: View {
                 }
                 Spacer(minLength: 8)
                 TimelineView(.lapSeconds) { context in
-                    LapReadout(progress: progress(reference, at: context.date), job: job)
+                    LapReadout(progress: progress(reference, at: context.date), job: job, isFirstRun: !model.hasEarlierRuns(of: job))
                 }
             }.padding(.top, 8)
             track(reference).padding(.top, 10)
             TimelineView(.lapSeconds) { context in
-                LapCaption(progress: progress(reference, at: context.date), now: context.date)
+                LapCaption(progress: progress(reference, at: context.date), now: context.date, isFirstRun: !model.hasEarlierRuns(of: job))
             }.padding(.top, 2)
             HStack(spacing: 10) {
                 if isControllable, !isFinished {
@@ -54,7 +57,7 @@ struct LapCard: View {
                     .help("Stop after this job finishes. Keep RunningMan open until the runner stops.")
                 }
                 Spacer()
-                if snapshot.runner.provider == .github {
+                if hasJobLog {
                     Button("Job log", systemImage: "list.bullet.rectangle") { openJobLog(nil) }
                         .buttonStyle(.link).font(.system(size: 11)).help("Show the steps and output of this job")
                 }
@@ -81,7 +84,7 @@ struct LapCard: View {
             }
             // One click selects a step and keeps its details up; a double click opens it in the job log.
             .onTapGesture(count: 2, coordinateSpace: .local) { location in
-                guard let index = sector(at: location.x, reference: reference) else { return }
+                guard hasJobLog, let index = sector(at: location.x, reference: reference) else { return }
                 openJobLog(progress(reference, at: Date()).sectors.first { $0.id == index }?.stepID)
             }
             .onTapGesture(count: 1, coordinateSpace: .local) { location in
@@ -92,10 +95,10 @@ struct LapCard: View {
             .overlay(alignment: .topLeading) {
                 if let shown = hovered ?? selected { inspector(shown, reference: reference) }
             }
-            // Keyboard-driven like a text field: a click focuses it and still selects.
+            // Keyboard-driven like a text field: a click focuses it and still selects. The system
+            // focus ring shows where the keys go.
             .focusable(interactions: .edit)
             .focused($trackFocused)
-            .focusEffectDisabled()
             .onKeyPress(.leftArrow) { moveSelection(-1, reference: reference) }
             .onKeyPress(.rightArrow) { moveSelection(1, reference: reference) }
             .onKeyPress(.escape) {
@@ -104,18 +107,22 @@ struct LapCard: View {
                 return .handled
             }
             .onKeyPress(.return) {
+                guard hasJobLog else { return .ignored }
                 openJobLog(selected.flatMap { index in progress(reference, at: Date()).sectors.first { $0.id == index }?.stepID })
                 return .handled
             }
-            .onKeyPress(characters: CharacterSet(charactersIn: "gG")) { _ in
+            .onKeyPress(characters: CharacterSet(charactersIn: "gG")) { press in
+                // Command-G and other shortcuts pass through; Shift only makes the capital.
+                guard press.modifiers.subtracting(.shift).isEmpty else { return .ignored }
                 model.ghostPace = model.ghostPace.next
                 return .handled
             }
             .onChange(of: job.id) { _, _ in selected = nil }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Lap against \(reference?.pace.title.lowercased() ?? "no earlier run")")
+            .accessibilityLabel("Lap against \(reference?.pace.title.lowercased() ?? (model.hasEarlierRuns(of: job) ? "no successful run" : "no earlier run"))")
             .accessibilityValue(accessibilityValue(progress(reference, at: Date())))
-            .accessibilityHint("Adjust to step through the job's steps. Press Return to open the selected step in the job log.")
+            .accessibilityHint(hasJobLog ? "Adjust to step through the job's steps. Press Return to open the selected step in the job log."
+                                         : "Adjust to step through the job's steps.")
             .accessibilityAdjustableAction { direction in
                 _ = moveSelection(direction == .increment ? 1 : -1, reference: reference)
             }
@@ -166,7 +173,9 @@ struct LapCard: View {
                 let x = min(max(span.x + span.width / 2 - width / 2, 0), max(0, trackWidth - width))
                 SectorInspector(sector: sector, isRunning: current.currentSector == index)
                     .frame(width: width)
-                    .offset(x: x, y: -64)
+                    // Above the track whatever its height: its bottom sits just over the track.
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { inspectorHeight = $0 }
+                    .offset(x: x, y: -inspectorHeight - 6)
                     .allowsHitTesting(false)
             }
         }
@@ -189,7 +198,7 @@ struct LapCard: View {
         case .cancelled: parts.append("Cancelled after \(LapProgress.clock(progress.elapsed))")
         }
         if let selected, let sector = progress.sectors.first(where: { $0.id == selected }) {
-            parts.append("Selected: \(SectorInspector.summary(sector))")
+            parts.append("Selected: \(sector.name.isEmpty ? "whole job" : sector.name), \(SectorInspector.summary(sector))")
         }
         return parts.joined(separator: ". ")
     }
@@ -206,6 +215,8 @@ struct LapReadout: View {
     let progress: LapProgress
     let job: RunnerJob
     var compact = false
+    /// False when earlier runs were seen but none succeeded, so none can be the ghost.
+    var isFirstRun = true
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 1) {
@@ -218,12 +229,18 @@ struct LapReadout: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// A job paced as a whole has no lead while it is inside its usual time, so it shows what is
+    /// left of that time instead; past it, the lead counts how far over it is.
+    private var timeLeft: Double? {
+        guard progress.outcome == .running, let reference = progress.reference, reference.isWholeJob, progress.lead <= 0 else { return nil }
+        return max(reference.total - progress.elapsed, 0)
+    }
+
     private var value: String {
         switch progress.outcome {
         case .running:
-            guard let reference = progress.reference else { return LapProgress.clock(progress.elapsed).replacingOccurrences(of: " s", with: "s") }
-            // A job paced as a whole has no lead until it finishes or runs long; show what is left.
-            if reference.isWholeJob, progress.lead <= 0, let remaining = progress.remaining { return Self.minutes(remaining) + (compact ? " left" : "") }
+            guard progress.reference != nil else { return Self.minutes(progress.elapsed) }
+            if let timeLeft { return Self.minutes(timeLeft) + (compact ? " left" : "") }
             return Self.signed(progress.lead)
         case .success: return Self.minutes(progress.elapsed)
         case .failure: return compact ? "Failed" : Self.minutes(progress.elapsed)
@@ -234,14 +251,15 @@ struct LapReadout: View {
     private var caption: String {
         switch progress.outcome {
         case .running:
-            guard let reference = progress.reference else { return "first recorded run" }
-            if reference.isWholeJob, progress.lead <= 0 { return "left, usually" }
+            guard progress.reference != nil else { return isFirstRun ? "first recorded run" : "no successful run yet" }
+            if timeLeft != nil { return "left, usually" }
             let lead = Int(progress.lead.rounded())
             return lead == 0 ? "level" : lead < 0 ? "ahead" : "behind"
         case .success:
             guard let reference = progress.reference else { return "finished" }
             if let best = reference.bestTotal, progress.elapsed < best { return "personal best" }
-            return LapProgress.describeLead(progress.lead).replacingOccurrences(of: "ahead", with: "faster").replacingOccurrences(of: "behind", with: "slower")
+            let lead = Int(progress.lead.rounded())
+            return lead == 0 ? "level" : "\(LapProgress.clock(Double(abs(lead)))) \(lead < 0 ? "faster" : "slower")"
         case .failure: return "failed"
         case .cancelled: return "cancelled"
         }
@@ -250,8 +268,7 @@ struct LapReadout: View {
     private var tone: Color {
         switch progress.outcome {
         case .running:
-            guard let reference = progress.reference else { return .primary }
-            if reference.isWholeJob, progress.lead <= 0 { return .primary }
+            guard progress.reference != nil, timeLeft == nil else { return .primary }
             let lead = Int(progress.lead.rounded())
             return lead < 0 ? StatusTone.positive.text : lead > 0 ? StatusTone.warning.text : .primary
         case .success:
@@ -284,6 +301,8 @@ struct LapReadout: View {
 struct LapCaption: View {
     let progress: LapProgress
     let now: Date
+    /// False when earlier runs were seen but none succeeded.
+    var isFirstRun = true
 
     var body: some View {
         // In a narrow detail the step comes first; the finish estimate gives way.
@@ -330,18 +349,25 @@ struct LapCaption: View {
 
     private func stepText(_ sector: LapProgress.Sector) -> String {
         let actual = LapProgress.clock(sector.actual ?? 0)
-        guard sector.reference > 0 else { return "\(sector.name) · \(actual)" + (progress.reference == nil ? "" : " · new step") }
+        // A step with no usual time is new only if no recorded run ever ran it.
+        guard sector.reference > 0 else { return "\(sector.name) · \(actual)" + (progress.reference == nil || !sector.history.isEmpty ? "" : " · new step") }
         return sector.isOverrun
             ? "\(sector.name) · usually \(LapProgress.clock(sector.reference)) · \(actual) now"
             : "\(sector.name) · \(actual) of usually \(LapProgress.clock(sector.reference))"
     }
 
     private var finishText: String {
-        guard let reference = progress.reference else { return "First recorded run of this job" }
+        guard let reference = progress.reference else { return isFirstRun ? "First recorded run of this job" : "No earlier run of this job succeeded" }
         let all = reference.totals + [progress.elapsed]
         let rank = all.filter { $0 < progress.elapsed }.count + 1
-        let ordinal = rank == 1 ? "fastest" : rank == 2 ? "2nd fastest" : rank == 3 ? "3rd fastest" : "\(rank)th fastest"
-        return "Finished in \(LapProgress.clock(progress.elapsed)) · \(ordinal) of \(all.count) runs"
+        let place = rank == 1 ? "fastest" : "\(Self.ordinal(rank)) fastest"
+        return "Finished in \(LapProgress.clock(progress.elapsed)) · \(place) of \(all.count) \(all.count == 1 ? "run" : "runs")"
+    }
+
+    /// "2nd", "11th", "21st".
+    static func ordinal(_ number: Int) -> String {
+        let suffixes = ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"]
+        return "\(number)\((11...13).contains(number % 100) ? "th" : suffixes[number % 10])"
     }
 }
 
@@ -380,7 +406,7 @@ struct HistoryStrip: View {
 
     var body: some View {
         let values = Array(history.suffix(19)) + (current.map { [$0] } ?? [])
-        let top = max(values.max() ?? 1, 1)
+        let top = max(values.max() ?? 0, 0.001)
         HStack(alignment: .bottom, spacing: 2) {
             ForEach(Array(values.enumerated()), id: \.offset) { index, value in
                 let isCurrent = current != nil && index == values.count - 1

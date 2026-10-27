@@ -14,8 +14,11 @@ final class LapSounds: @unchecked Sendable {
     private let player = AVAudioPlayerNode()
     private let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
     private var buffers: [String: AVAudioPCMBuffer] = [:]
-    private var isRunning = false
+    /// When the sounds already scheduled finish playing.
+    private var scheduledUntil = Date.distantPast
     private var idleStop: DispatchWorkItem?
+    /// A sound that would start later than this no longer matches what the track shows.
+    private static let maximumDelay: TimeInterval = 1
 
     private init() {
         engine.attach(player)
@@ -42,19 +45,27 @@ final class LapSounds: @unchecked Sendable {
 
     private func start(_ name: String) {
         guard let buffer = buffer(named: name) else { return }
-        do {
-            if !isRunning { try engine.start(); isRunning = true }
-        } catch { return }
+        let now = Date()
+        guard scheduledUntil.timeIntervalSince(now) <= Self.maximumDelay else { return }
+        // The engine stops itself when the output device changes, so ask it rather than
+        // remembering; a restarted engine needs its player started again too.
+        let restarting = !engine.isRunning
+        if restarting {
+            // Sounds are a nicety: without an output device the track simply stays quiet.
+            do { try engine.start() } catch { return }
+            scheduledUntil = now
+        }
         player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
-        if !player.isPlaying { player.play() }
-        // Release the audio device a little after the last sound.
+        if restarting || !player.isPlaying { player.play() }
+        scheduledUntil = max(scheduledUntil, now).addingTimeInterval(Double(buffer.frameLength) / format.sampleRate)
+        // Release the audio device a little after the last sound has played.
         idleStop?.cancel()
         let stop = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            player.stop(); engine.stop(); isRunning = false
+            player.stop(); engine.stop()
         }
         idleStop = stop
-        queue.asyncAfter(deadline: .now() + 4, execute: stop)
+        queue.asyncAfter(deadline: .now() + scheduledUntil.timeIntervalSince(now) + 3, execute: stop)
     }
 
     private func buffer(named name: String) -> AVAudioPCMBuffer? {

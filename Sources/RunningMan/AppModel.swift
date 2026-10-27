@@ -163,6 +163,8 @@ final class AppModel {
     var laps: [LapKey: [LapRecord]] = [:]
     /// Which earlier run the ghost replays, for this session.
     var ghostPace: GhostPace = .usual
+    /// Changes when a finished job's time on the lap card ends.
+    var lapLingerRevision = 0
     var lapSoundsEnabled = true {
         didSet { if !demoMode { UserDefaults.standard.set(lapSoundsEnabled, forKey: "lapSoundsEnabled") } }
     }
@@ -222,6 +224,12 @@ final class AppModel {
     /// Jobs whose lap was already handed to the lap book, so each finished run is recorded once.
     @ObservationIgnored var recordedLapJobIDs: Set<String> = []
     @ObservationIgnored var demoRaceTask: Task<Void, Never>?
+    /// The demo runner the race runs on, while it runs.
+    @ObservationIgnored var demoRaceRunnerID: String?
+    /// The latest batch of laps being recorded; each batch waits for the one before it.
+    @ObservationIgnored var lapRecording: Task<Void, Never>?
+    /// Finished jobs whose end of linger is scheduled.
+    @ObservationIgnored var lingeringJobIDs: Set<String> = []
     @ObservationIgnored private let refreshes = RefreshCoalescer()
     @ObservationIgnored private var usageComputedAt: Date?
     @ObservationIgnored private var usageCapacities: [String: Int] = [:]
@@ -484,7 +492,7 @@ final class AppModel {
         assign(\.warnings, nextWarnings)
         logTails = scan.tails
         updateStepLogs(github.stepLogs)
-        recordFinishedLaps()
+        recordFinishedLaps(also: github.finishedStepLogs)
         updateSelectedLog()
         for event in scan.events { record(event) }
         for runner in runners {
@@ -1305,7 +1313,7 @@ final class AppModel {
     /// its job successfully after a short pause and then takes the normal idle-stop path.
     private func simulateJobFinish(for runnerID: String) {
         // The demo race finishes its own run and then honours the request.
-        if demoRaceTask != nil, runnerID == runners.first?.id { return }
+        if runnerID == demoRaceRunnerID { return }
         let delay = demoDrainDelay
         Task { [weak self] in
             try? await Task.sleep(for: delay)

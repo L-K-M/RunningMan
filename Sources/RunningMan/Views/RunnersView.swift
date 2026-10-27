@@ -185,6 +185,8 @@ struct RunnerDetailView: View {
                     Text("Live log").tag("Live log")
                     Text("Jobs (\(model.jobCount(for: snapshot.id)))").tag("Jobs")
                 }.pickerStyle(.segmented).labelsHidden()
+                    // A step chosen on the track opens the job log once, not on every later visit.
+                    .onChange(of: tab) { _, tab in if tab != "Job log" { jobLogFocus = nil } }
             }.padding(24)
             Divider()
             switch tab {

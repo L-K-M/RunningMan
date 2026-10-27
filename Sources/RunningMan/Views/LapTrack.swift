@@ -46,7 +46,8 @@ struct LapLayout {
         if !sectors.isEmpty {
             // Give small sectors the minimum, then share the rest by reference time.
             var fixed = Set<Int>()
-            for _ in 0..<3 {
+            // Each round fixes at least one more sector or stops, so this ends within count rounds.
+            for _ in 0...sectors.count {
                 let free = available - CGFloat(fixed.count) * minimumSector
                 let freeLength = lengths.enumerated().filter { !fixed.contains($0.offset) }.reduce(0) { $0 + $1.element }
                 var changed = false
@@ -109,7 +110,10 @@ final class LapMotion {
     private var velocity: Double = 0
     private var lastTarget: Double = 0
     private var lastFrame: Date?
-    private var lastGap: Double?
+    /// Set while the runner is clearly behind the ghost; a pass needs it first, so one pass is
+    /// called out once however slowly the spring then glides past.
+    private var wasBehind = false
+    private var referenceID: String?
     private var finishedSectors: Set<Int> = []
     private var outcome: LapProgress.Outcome = .running
     private(set) var passedAt: Date?
@@ -125,12 +129,14 @@ final class LapMotion {
         guard self.jobID == jobID else {
             self.jobID = jobID
             shownLive = target; velocity = 0; lastFrame = now
-            lastGap = progress.total > 0 ? progress.live - progress.ghost : nil
-            finishedSectors = Set(progress.sectors.filter { if case .finished = $0.state { return true } else { return false } }.map(\.id))
+            seed(progress)
             outcome = progress.outcome
             passedAt = nil; finishedAt = progress.isFinished ? .distantPast : nil; surgingUntil = nil; particles = []
             return []
         }
+        // Another ghost moves every sector and the gap at once; the spring carries the runner to
+        // its new place, but nothing it passes on the way happened in the race.
+        if Self.identity(of: progress.reference) != referenceID { seed(progress) }
         // Frames can be an eighth of a second apart, so the spring runs in small steps to stay stable.
         var remaining = min(max(now.timeIntervalSince(lastFrame ?? now), 0), 0.5)
         lastFrame = now
@@ -158,14 +164,17 @@ final class LapMotion {
                 if split < -LapProgress.splitThreshold { surgingUntil = now.addingTimeInterval(0.7) }
             }
         }
+        // Judged on the race, not the spring, so overshoot cannot fake a pass and a slow glide
+        // cannot miss one. A ghost waiting at the line is caught, not passed.
         if progress.total > 0, progress.outcome == .running || progress.outcome == .success {
-            let gap = shownLive - progress.ghost
-            if let lastGap, lastGap < -0.4, gap >= 0 {
+            if progress.ghost - progress.live > Self.behind {
+                wasBehind = true
+            } else if wasBehind, progress.live >= progress.ghost, progress.ghost < progress.total {
+                wasBehind = false
                 events.append(.overtake)
                 passedAt = now
                 passX = layout.x(for: progress.ghost)
             }
-            lastGap = gap
         }
         if outcome == .running, progress.outcome != .running {
             events.append(.finished(progress.outcome))
@@ -187,7 +196,26 @@ final class LapMotion {
         }
     }
 
+    /// How far behind the ghost counts as behind, in reference seconds.
+    private static let behind = 0.4
+
+    /// Takes the race as it stands without calling anything out.
+    private func seed(_ progress: LapProgress) {
+        referenceID = Self.identity(of: progress.reference)
+        wasBehind = progress.total > 0 && progress.ghost - progress.live > Self.behind
+        finishedSectors = Set(progress.sectors.filter { if case .finished = $0.state { return true } else { return false } }.map(\.id))
+    }
+
+    private static func identity(of reference: LapReference?) -> String? {
+        reference.map { "\($0.pace.rawValue) \($0.runs) \($0.total) \($0.sectors.count)" }
+    }
+
     func surging(at now: Date) -> Bool { surgingUntil.map { now < $0 } ?? false }
+
+    /// A finished race whose finish has played out draws the same frame from then on.
+    func isSettled(at now: Date) -> Bool {
+        outcome != .running && particles.isEmpty && shownLive == lastTarget && !wantsSmoothFrames(at: now)
+    }
 
     /// Smooth frames are needed only while something moves quickly: the surge spring, the
     /// overtake glint, the finish. Otherwise the track ticks like the menu bar figure.
@@ -317,7 +345,9 @@ private final class LapFrameView: NSView {
 
     private func scheduleFrame(after now: Date) {
         timer?.invalidate()
-        guard let window else { return }
+        timer = nil
+        // A settled track redraws only when SwiftUI hands it something new.
+        guard let window, template?.motion.isSettled(at: now) != true else { return }
         let fast = smooth && template?.motion.wantsSmoothFrames(at: now) == true
         let interval = !window.occlusionState.contains(.visible) ? 1 : fast ? 1.0 / 60 : calm
         let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
@@ -515,10 +545,11 @@ private struct LapFrame: View {
             guard case .finished(.success) = sector.state, let split = sector.split else { continue }
             let center = CGPoint(x: span.x + span.width / 2, y: y + 8)
             let color: Color = sector.isPersonalBest ? LapPalette.personalBest : split < 0 ? StatusTone.positive.text : split > 0 ? StatusTone.warning.text : .secondary
-            let label = sector.isPersonalBest ? "PB" : split == 0 ? "" : (split < 0 ? "−" : "+") + "\(Int(abs(split).rounded()))s"
+            let seconds = Int(abs(split).rounded())
+            let label = sector.isPersonalBest ? "PB" : seconds == 0 ? "" : (split < 0 ? "−" : "+") + "\(seconds)s"
             if span.width >= 26, !label.isEmpty {
                 context.draw(Text(label).font(.system(size: 9, weight: .bold, design: .rounded)).foregroundStyle(color), at: center)
-            } else if split != 0 || sector.isPersonalBest {
+            } else if seconds != 0 || sector.isPersonalBest {
                 context.fill(Path(ellipseIn: CGRect(x: center.x - 1.5, y: center.y - 1.5, width: 3, height: 3)), with: .color(color))
             }
         }

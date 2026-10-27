@@ -70,4 +70,90 @@ final class GhostLapDemoTests: XCTestCase {
         }
         XCTAssertNil(model.lapReference(for: job), "A Forgejo run of the same name is a different job")
     }
+
+    @MainActor func testTheCardStaysWhileAFinishIsStillArriving() throws {
+        let model = AppModel(demoMode: true)
+        let runnerID = model.runners[0].id
+        let job = try XCTUnwrap(model.runners[0].currentJob)
+        // A refresh publishes runners before history and step logs: the job is no longer current
+        // but is not finished yet either.
+        model.runners[0].currentJob = nil
+        XCTAssertEqual(model.lapJob(for: runnerID)?.id, job.id)
+    }
+
+    @MainActor func testAFinishedJobDisplacedFromItsStepLogIsRecorded() async throws {
+        let model = AppModel(demoMode: true)
+        var job = try XCTUnwrap(model.runners[0].currentJob)
+        job.id = "synthetic-displaced"
+        let start = job.startedAt
+        job.finishedAt = start.addingTimeInterval(120)
+        job.outcome = .success
+        model.jobs.insert(job, at: 0)
+        let log = AppModel.demoRaceLog(AppModel.demoRaces[1], jobID: job.id, runnerID: model.runners[0].id, start: start,
+                                       now: start.addingTimeInterval(400))
+        model.recordFinishedLaps(also: [log])
+        await model.lapRecording?.value
+        XCTAssertTrue(model.laps[model.lapKey(for: job)]?.contains { $0.jobID == job.id } ?? false)
+    }
+
+    @MainActor func testAJobThatNeverSucceededIsNotItsFirstRun() throws {
+        let model = AppModel(demoMode: true)
+        var job = try XCTUnwrap(model.jobs.first { $0.name == "Unit tests" && $0.outcome == .success })
+        model.laps = [:]
+        XCTAssertTrue(model.hasEarlierRuns(of: job))
+        job.name = "A job never seen before"
+        XCTAssertFalse(model.hasEarlierRuns(of: job))
+    }
+
+    /// Waits for the demo race to react to a change the user made, at most a few seconds.
+    @MainActor private func waitForCancelledRun(_ model: AppModel) async throws -> RunnerJob? {
+        for _ in 0..<50 {
+            if let job = model.jobs.first(where: { $0.id == "demo-job-0" }), job.outcome == .cancelled { return job }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return model.jobs.first { $0.id == "demo-job-0" }
+    }
+
+    @MainActor func testStoppingTheRaceRunnerCancelsItsRun() async throws {
+        let model = AppModel(demoMode: true)
+        model.startDemoRace()
+        defer { model.demoRaceTask?.cancel() }
+        let runnerID = model.runners[0].id
+        // What the demo's Stop does to a busy runner.
+        model.runners[0].status = .stopped
+        model.runners[0].currentJob = nil
+        let job = try await waitForCancelledRun(model)
+        XCTAssertEqual(job?.outcome, .cancelled)
+        XCTAssertNotNil(job?.finishedAt, "An interrupted run must not stay Running in History")
+        XCTAssertEqual(model.stepLogs[runnerID]?.isFinished, true)
+        XCTAssertEqual(model.runners[0].status, .stopped)
+    }
+
+    @MainActor func testDisablingTheRaceRunnerEndsItsRun() async throws {
+        let model = AppModel(demoMode: true)
+        model.startDemoRace()
+        defer { model.demoRaceTask?.cancel() }
+        // What the demo's Disable does: the job stays assigned.
+        model.runners[0].isEnabled = false
+        model.runners[0].status = .disabled
+        let job = try await waitForCancelledRun(model)
+        XCTAssertEqual(job?.outcome, .cancelled)
+        XCTAssertNil(model.runners[0].currentJob)
+        XCTAssertEqual(model.runners[0].status, .disabled)
+    }
+
+    @MainActor func testTheDemoRaceStaysOnItsOwnRunner() {
+        let model = AppModel(demoMode: true)
+        // Only the GitHub runner races; Forgejo runners keep no local record of a running job.
+        XCTAssertTrue(model.runners.filter { $0.runner.provider == .forgejo }.allSatisfy { model.lapJob(for: $0.id) == nil })
+        let log = AppModel.demoRaceLog(AppModel.demoRaces[2], jobID: "synthetic", runnerID: "synthetic", start: Date(timeIntervalSince1970: 0),
+                                       now: Date(timeIntervalSince1970: 400))
+        let ids = log.steps.flatMap(\.lines).map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count, "Every output line has its own ID")
+    }
+
+    func testFinishRanksReadAsOrdinals() {
+        XCTAssertEqual([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111, 112].map(LapCaption.ordinal),
+                       ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd", "101st", "111th", "112th"])
+    }
 }
