@@ -77,7 +77,7 @@ final class GhostLapTests: XCTestCase {
         let late = LapProgress.make(steps: live, reference: reference, jobStarted: start, isFinished: false, now: start.addingTimeInterval(30))
         XCTAssertEqual(late.live, 3 + 6 * LapProgress.runningCap, accuracy: 0.001)
         XCTAssertEqual(late.ghost, 30, accuracy: 0.001)
-        XCTAssertEqual(late.lead, 30 - (3 + 6 * LapProgress.runningCap), accuracy: 0.001)
+        XCTAssertEqual(late.lead, 30 - (3 + 6), accuracy: 0.001, "The lead counts the time past the step's usual length")
         XCTAssertTrue(late.sectors[1].isOverrun, "27 s against a usual 6 s is an overrun")
         XCTAssertEqual(late.remaining ?? 0, 0.9 + 52, accuracy: 0.001)
     }
@@ -278,5 +278,102 @@ final class GhostLapTests: XCTestCase {
         XCTAssertEqual(loaded[key]?.map(\.jobID), ["a", "b", "long"])
         XCTAssertEqual(loaded[key]?.last?.splits.isEmpty, true)
         XCTAssertEqual(loaded.count, LapBook.maximumJobs)
+    }
+
+    /// Steps as worker logs time them: starts to the fraction, ends in whole seconds, so a short
+    /// gap separates each step's end from the next step's start.
+    private func gappedSteps(_ items: [(String, start: Double, end: Double?, JobStepOutcome)]) -> [JobStep] {
+        items.enumerated().map { index, item in
+            JobStep(id: index, name: item.0, startedAt: start.addingTimeInterval(item.start), finishedAt: item.end.map { start.addingTimeInterval($0) },
+                    outcome: item.3, lines: [])
+        }
+    }
+
+    func testSplitsKeepTheTimeBetweenStepsSoAnIdenticalRunIsLevel() throws {
+        let run = gappedSteps([("Set up job", 0, 2, .success), ("Build", 2.6, 30, .success), ("Upload", 30.4, 35, .success)])
+        let log = JobStepLog(jobID: "a", runnerID: "r", isFinished: true, hasOutput: true, isTruncated: false, revision: 1, steps: run)
+        let record = try XCTUnwrap(LapRecord(log: log, outcome: .success))
+        XCTAssertEqual(record.splits.map(\.seconds).reduce(0, +), record.seconds, accuracy: 0.001)
+        XCTAssertEqual(record.splits.map(\.seconds)[0], 2.6, accuracy: 0.001)
+        let laps = ["a", "b", "c"].enumerated().map { LapRecord(jobID: $1, finishedAt: start.addingTimeInterval(Double($0)), outcome: .success,
+                                                                 seconds: record.seconds, splits: record.splits) }
+        let reference = try XCTUnwrap(LapReference.make(from: laps, pace: .usual))
+        let again = LapProgress.make(steps: run, reference: reference, jobStarted: start, isFinished: true, jobOutcome: .success,
+                                     now: start.addingTimeInterval(40))
+        XCTAssertEqual(again.lead, 0, accuracy: 0.001, "The same run again is level, not behind by its gaps")
+        XCTAssertEqual(again.sectors.compactMap(\.split), [0, 0, 0])
+        // Mid-run, the gap after a finished step belongs to that step once the next one starts.
+        let midway = LapProgress.make(steps: Array(run.prefix(2)).enumerated().map { index, step in
+            index == 1 ? JobStep(id: 1, name: step.name, startedAt: step.startedAt, finishedAt: nil, outcome: .running, lines: []) : step
+        }, reference: reference, jobStarted: start, isFinished: false, now: start.addingTimeInterval(10))
+        XCTAssertEqual(midway.lead, 0, accuracy: 0.001)
+    }
+
+    func testTheLeadIsMeasuredAgainstTheGhostNotTheCappedRunner() throws {
+        // A running step at exactly its usual time is level, though the figure waits at 98%.
+        let reference = usualReference  // 3, 6, 52
+        let level = LapProgress.make(steps: steps([("Set up job", 3, .success), ("Restore cache", nil, .running)]), reference: reference,
+                                     jobStarted: start, isFinished: false, now: start.addingTimeInterval(9))
+        XCTAssertEqual(level.lead, 0, accuracy: 0.001)
+        XCTAssertEqual(level.live, 3 + 6 * LapProgress.runningCap, accuracy: 0.001)
+        let late = LapProgress.make(steps: steps([("Set up job", 3, .success), ("Restore cache", nil, .running)]), reference: reference,
+                                    jobStarted: start, isFinished: false, now: start.addingTimeInterval(14))
+        XCTAssertEqual(late.lead, 5, accuracy: 0.001)
+        // Paced as a whole: level until the usual time, then behind by exactly the overrun.
+        let laps = [600.0, 600, 600].enumerated().map { LapRecord(jobID: "\($0)", finishedAt: start.addingTimeInterval(Double($0)), outcome: .success, seconds: $1) }
+        let whole = try XCTUnwrap(LapReference.make(from: laps, pace: .usual))
+        let before = LapProgress.make(steps: [], reference: whole, jobStarted: start, isFinished: false, now: start.addingTimeInterval(595))
+        XCTAssertEqual(before.lead, 0, accuracy: 0.001)
+        let after = LapProgress.make(steps: [], reference: whole, jobStarted: start, isFinished: false, now: start.addingTimeInterval(660))
+        XCTAssertEqual(after.lead, 60, accuracy: 0.001)
+    }
+
+    func testOnlyAWholeTimelineMakesALap() {
+        let finished = steps([("Set up job", 2, .success), ("Build", 30, .success)])
+        let partial = JobStepLog(jobID: "a", runnerID: "r", isFinished: true, hasOutput: true, isTruncated: false, revision: 1, steps: finished,
+                                 isComplete: false)
+        XCTAssertNil(LapRecord(log: partial, outcome: .success), "The listener said done before the worker log was read to its end")
+        let cut = JobStepLog(jobID: "b", runnerID: "r", isFinished: true, hasOutput: true, isTruncated: false, revision: 1,
+                             steps: steps([("Set up job", 2, .success), ("Build", nil, .unknown)]))
+        XCTAssertNil(LapRecord(log: cut, outcome: .success), "A step without an end would shorten the lap")
+    }
+
+    func testSkippedRunsOfAStepStayOutOfItsBestAndHistory() throws {
+        let laps = [
+            lap("a", [("Build", 30), ("Publish", 45)], at: 1),
+            LapRecord(jobID: "b", finishedAt: start.addingTimeInterval(2), outcome: .success, seconds: 30,
+                      splits: [LapSplit(name: "Build", seconds: 30, outcome: .success), LapSplit(name: "Publish", seconds: 0, outcome: .skipped)]),
+            lap("c", [("Build", 30), ("Publish", 44)], at: 3),
+            lap("d", [("Build", 30), ("Publish", 46)], at: 4),
+        ]
+        let reference = try XCTUnwrap(LapReference.make(from: laps, pace: .usual))
+        let publish = try XCTUnwrap(reference.sectors.first { $0.name == "Publish" })
+        XCTAssertEqual(publish.history, [45, 44, 46])
+        XCTAssertEqual(publish.best, 44)
+    }
+
+    func testAnUnreadableLapBookIsKeptAndNotOverwritten() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("lapbook-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("laps.json")
+        let key = LapKey(provider: .github, repository: "example/app", workflow: "CI", job: "Build")
+        await LapBook(fileURL: url).record(lap("saved", [("Build", 30)], at: 1), for: key)
+        let saved = try Data(contentsOf: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: url.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path) }
+
+        let book = LapBook(fileURL: url)
+        let unreadable = await book.load()
+        XCTAssertTrue(unreadable.isEmpty)
+        let held = await book.record(lap("new", [("Build", 31)], at: 2), for: key)
+        XCTAssertEqual(held[key]?.map(\.jobID), ["new"], "Laps recorded meanwhile are kept in memory")
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        XCTAssertEqual(names, ["laps.json"], "A file that could not be read is neither set aside nor replaced")
+
+        // Once the file can be read again, the book merges what it held.
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        XCTAssertEqual(try Data(contentsOf: url), saved)
+        let merged = await book.load()
+        XCTAssertEqual(merged[key]?.map(\.jobID), ["saved", "new"])
     }
 }

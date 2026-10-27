@@ -299,4 +299,46 @@ final class JobStepLogTests: XCTestCase {
         XCTAssertLessThanOrEqual(lines.count, 40_000)
         XCTAssertEqual(lines.last?.text, "line 49999")
     }
+
+    func testAJobReplacedByTheNextWithinOneScanIsStillReported() async throws {
+        try write(completedWorkerLog, to: workerLog)
+        let nextJob = "33333333-3333-3333-3333-333333333333"
+        try write(worker([
+            "10:00:12Z INFO JobRunner] Job ID \(nextJob)",
+            "10:00:14Z INFO StepsRunner] Processing step: DisplayName='Build'"
+        ]), to: runner.directory.appendingPathComponent("_diag/Worker_20261016-100011-utc.log"))
+        let result = await RunnerLogMonitor().scan(runners: [runner])
+        XCTAssertEqual(result.stepLogs[runner.id]?.jobID, "\(runner.id)::\(nextJob)")
+        let finished = try XCTUnwrap(result.finishedStepLogs.first)
+        XCTAssertEqual(result.finishedStepLogs.count, 1)
+        XCTAssertEqual(finished.jobID, "\(runner.id)::\(jobID)")
+        XCTAssertTrue(finished.isFinished && finished.isComplete)
+        XCTAssertEqual(finished.steps.map(\.name), ["Set up job", "Run actions/checkout@v4", "Build", "Upload", "Complete job"])
+        XCTAssertTrue(finished.steps.allSatisfy { $0.finishedAt != nil })
+    }
+
+    func testATimelineWithSkippedLinesIsNotComplete() async throws {
+        // A large worker log seen for the first time is read as its header and newest tail.
+        var text = worker([
+            "10:00:01Z INFO JobRunner] Job ID \(jobID)",
+            "10:00:03Z INFO StepsRunner] Processing step: DisplayName='Build'"
+        ])
+        let filler = worker(["10:00:04Z INFO Worker] " + String(repeating: "x", count: 200)])
+        while text.utf8.count < Int(DiagnosticLogLimits.largeFile) + 64 * 1024 { text += filler }
+        text += worker([
+            "10:00:40Z INFO StepsRunner] Step result: Succeeded",
+            "10:00:41Z INFO StepsRunner] Processing step: DisplayName='Upload'",
+            "10:00:45Z INFO StepsRunner] Step result: Succeeded",
+            "10:00:46Z INFO JobRunner] Finalize job.",
+            "10:00:47Z INFO JobRunner] Job result after all job steps finish: Succeeded"
+        ])
+        try write(text, to: workerLog)
+        let log = try await stepLog(RunnerLogMonitor())
+        XCTAssertTrue(log.isFinished)
+        XCTAssertFalse(log.isComplete, "Steps between the header and the tail were never read")
+
+        try write(completedWorkerLog, to: workerLog)
+        let whole = try await stepLog(RunnerLogMonitor())
+        XCTAssertTrue(whole.isComplete)
+    }
 }

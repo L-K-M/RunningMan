@@ -5,7 +5,8 @@ import Foundation
 // constant speed along that axis; the live runner crosses a sector as fast as the step finishes.
 // While a step runs, nothing says how far along it is, so the runner advances at the ghost's speed
 // and stops just short of the sector's end; when the step finishes it surges to the boundary. The
-// lead is therefore exact at every step boundary and never guessed in between.
+// lead is measured against the ghost, not the waiting figure, so it is exact at every step
+// boundary and grows only once a step runs past its usual time.
 
 /// Identifies the same job across runs, so earlier runs can pace a new one.
 public struct LapKey: Hashable, Codable, Sendable {
@@ -46,14 +47,32 @@ public struct LapRecord: Codable, Hashable, Sendable {
         self.jobID = jobID; self.finishedAt = finishedAt; self.outcome = outcome; self.seconds = seconds; self.splits = splits
     }
 
-    /// A finished step log as a lap, or nil while the job runs or when it has no timed steps.
+    /// A finished step log as a lap, or nil unless its whole timeline was read: a lap missing its
+    /// last steps would race every later run against a ghost that finishes early.
     public init?(log: JobStepLog, outcome: JobOutcome) {
-        guard log.isFinished, let first = log.steps.first, let end = log.steps.compactMap(\.finishedAt).max() else { return nil }
-        let splits = log.steps.compactMap { step -> LapSplit? in
-            guard let finished = step.finishedAt else { return nil }
-            return LapSplit(name: step.name, seconds: max(0, finished.timeIntervalSince(step.startedAt)), outcome: step.outcome)
-        }
+        guard log.isFinished, log.isComplete, let first = log.steps.first,
+              log.steps.allSatisfy({ $0.finishedAt != nil && $0.outcome != .running }),
+              let end = log.steps.compactMap(\.finishedAt).max() else { return nil }
+        let durations = JobStep.contiguousDurations(log.steps)
+        let splits = log.steps.map { LapSplit(name: $0.name, seconds: durations[$0.id] ?? 0, outcome: $0.outcome) }
         self.init(jobID: log.jobID, finishedAt: end, outcome: outcome, seconds: max(0, end.timeIntervalSince(first.startedAt)), splits: splits)
+    }
+}
+
+extension JobStep {
+    /// Seconds each finished step took, by step ID, measured to the start of the step after it.
+    /// Worker logs give a step's end in whole seconds but its start to the fraction, so measured
+    /// to its own end every step would leave out the gap before the next, and a ghost made of
+    /// those splits would always finish early. This way the splits add up to the whole run.
+    static func contiguousDurations(_ steps: [JobStep]) -> [Int: Double] {
+        var durations: [Int: Double] = [:]
+        for (index, step) in steps.enumerated() {
+            guard let finished = step.finishedAt, step.outcome != .running else { continue }
+            let next = steps.indices.contains(index + 1) ? steps[index + 1].startedAt : nil
+            let end = next.map { max(finished, $0) } ?? finished
+            durations[step.id] = max(0, end.timeIntervalSince(step.startedAt))
+        }
+        return durations
     }
 }
 
@@ -129,15 +148,20 @@ public struct LapReference: Sendable, Equatable {
             let sector = Sector(name: "", occurrence: 0, seconds: seconds, best: bestTotal, history: successful.map(\.seconds))
             return LapReference(pace: effective, sectors: [sector], total: seconds, runs: runs, bestTotal: bestTotal, totals: successful.map(\.seconds))
         }
+        // The usual time counts runs that skipped a step, so a step skipped more often than not
+        // usually takes no time; its best and history count only the runs where it ran.
         var durations: [StepIdentity: [Double]] = [:]
+        var ran: [StepIdentity: [Double]] = [:]
         for lap in successful {
             for (identity, split) in identified(lap.splits) where split.outcome == .success || split.outcome == .skipped {
                 durations[identity, default: []].append(split.seconds)
+                if split.outcome == .success { ran[identity, default: []].append(split.seconds) }
             }
         }
         let sectors = identified(template.splits).map { identity, split -> Sector in
-            let history = durations[identity] ?? []
-            let seconds = effective == .usual && !history.isEmpty ? median(history) : split.seconds
+            let usual = durations[identity] ?? []
+            let history = ran[identity] ?? []
+            let seconds = effective == .usual && !usual.isEmpty ? median(usual) : split.seconds
             let best = history.count >= bestMinimumRuns ? history.min() : nil
             return Sector(name: identity.name, occurrence: identity.occurrence, seconds: seconds, best: best, history: history)
         }
@@ -236,7 +260,7 @@ public struct LapProgress: Sendable, Equatable {
         let end = isFinished ? (steps.compactMap(\.finishedAt).max() ?? now) : now
         let elapsed = max(0, end.timeIntervalSince(jobStarted))
         let reported = isFinished ? Outcome(jobOutcome) : nil
-        if let reference, reference.sectors.count == 1, reference.sectors[0].name.isEmpty {
+        if let reference, reference.isWholeJob {
             return jobLevel(reference: reference, steps: steps, jobStarted: jobStarted, elapsed: elapsed, isFinished: isFinished, reported: reported)
         }
 
@@ -257,8 +281,11 @@ public struct LapProgress: Sendable, Equatable {
 
         // Reference steps before the furthest step this run reached are behind it, run or not.
         let reached = plan.lastIndex { stepsByIdentity[$0.identity] != nil } ?? -1
+        let durations = JobStep.contiguousDurations(steps)
         var sectors: [Sector] = []
-        var start = 0.0, live = 0.0, remaining = 0.0
+        // `live` is where the figure is drawn; `position` is the same without the running cap,
+        // so the lead counts only time a step really spends past its usual length.
+        var start = 0.0, live = 0.0, position = 0.0, remaining = 0.0
         var current: Int?, failed: Int?
         var outcome: Outcome = isFinished ? .success : .running
         // The first failed or cancelled step stops the runner; cleanup after it does not move it.
@@ -271,19 +298,22 @@ public struct LapProgress: Sendable, Equatable {
             var personalBest = false, overrun = false
             let step = stepsByIdentity[entry.identity]
             if let step {
-                if let finished = step.finishedAt, step.outcome != .running {
-                    let seconds = max(0, finished.timeIntervalSince(step.startedAt))
+                if step.finishedAt != nil, step.outcome != .running {
+                    let seconds = durations[step.id] ?? 0
                     actual = seconds
                     state = .finished(step.outcome)
                     switch step.outcome {
                     case .failure, .cancelled:
                         // The runner stops where the job stopped, inside the sector.
-                        if !stopped { live = start + min(seconds, referenceSeconds * runningCap) }
+                        if !stopped {
+                            live = start + min(seconds, referenceSeconds * runningCap)
+                            position = start + min(seconds, referenceSeconds)
+                        }
                         stopped = true
                         if step.outcome == .failure { failed = failed ?? index; outcome = .failure }
                         else if outcome != .failure { outcome = .cancelled }
                     default:
-                        if !stopped { live = start + referenceSeconds }
+                        if !stopped { live = start + referenceSeconds; position = live }
                     }
                     if entry.reference != nil, step.outcome == .success {
                         let difference = seconds - referenceSeconds
@@ -297,7 +327,10 @@ public struct LapProgress: Sendable, Equatable {
                     actual = inStep
                     state = .running
                     current = index
-                    if !stopped { live = start + min(inStep, referenceSeconds * runningCap) }
+                    if !stopped {
+                        live = start + min(inStep, referenceSeconds * runningCap)
+                        position = start + min(inStep, referenceSeconds)
+                    }
                     remaining += max(referenceSeconds - inStep, referenceSeconds * 0.15)
                     overrun = referenceSeconds > 0 && inStep > referenceSeconds * 1.5 && inStep > referenceSeconds + 15
                 }
@@ -312,9 +345,9 @@ public struct LapProgress: Sendable, Equatable {
         let total = start
         if let reported { outcome = reported }
         // A successful job has crossed the whole track, including sectors it skipped.
-        if outcome == .success { live = total }
+        if outcome == .success { live = total; position = total }
         return LapProgress(sectors: sectors, total: total, elapsed: elapsed, live: live, ghost: total > 0 ? min(elapsed, total) : 0,
-                           lead: reference == nil ? 0 : elapsed - live,
+                           lead: reference == nil ? 0 : elapsed - position,
                            remaining: reference == nil || isFinished ? nil : remaining, outcome: outcome,
                            currentSector: current, failedSector: failed, reference: reference)
     }
@@ -327,7 +360,10 @@ public struct LapProgress: Sendable, Equatable {
         let stop = steps.first { $0.outcome == .failure || $0.outcome == .cancelled }
         let outcome = reported ?? stop.map { $0.outcome == .failure ? .failure : .cancelled } ?? (isFinished ? .success : .running)
         let stoppedAt = stop?.finishedAt.map { max(0, $0.timeIntervalSince(jobStarted)) } ?? elapsed
-        let live = outcome == .success ? total : min(outcome == .running ? elapsed : stoppedAt, total * runningCap)
+        let reached = outcome == .running ? elapsed : stoppedAt
+        let live = outcome == .success ? total : min(reached, total * runningCap)
+        // As with steps, the lead counts only time past the usual length, not the figure's wait.
+        let position = outcome == .success ? total : min(reached, total)
         let state: SectorState
         switch outcome {
         case .running: state = .running
@@ -340,7 +376,7 @@ public struct LapProgress: Sendable, Equatable {
                             isPersonalBest: outcome == .success && (reference.bestTotal.map { elapsed < $0 } ?? false),
                             isOverrun: outcome == .running && elapsed > total * 1.5 && elapsed > total + 15, history: reference.sectors[0].history)
         return LapProgress(sectors: [sector], total: total, elapsed: elapsed, live: live, ghost: min(elapsed, total),
-                           lead: elapsed - live, remaining: outcome == .running ? max(total - elapsed, total * 0.15) : nil,
+                           lead: elapsed - position, remaining: outcome == .running ? max(total - elapsed, total * 0.15) : nil,
                            outcome: outcome, currentSector: outcome == .running ? 0 : nil, failedSector: outcome == .failure ? 0 : nil,
                            reference: reference)
     }

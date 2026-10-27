@@ -15,6 +15,9 @@ public actor LapBook {
 
     private let fileURL: URL?
     private var cache: [LapKey: [LapRecord]]?
+    /// Laps recorded while the file could not be read. They stay in memory, the file is left as
+    /// it is, and they join the book once a later read succeeds.
+    private var unsaved: [LapKey: [LapRecord]] = [:]
 
     /// Without a file the book lives in memory only, as in demo mode, starting from `seed`.
     public init(fileURL: URL?, seed: [LapKey: [LapRecord]] = [:]) {
@@ -24,20 +27,30 @@ public actor LapBook {
 
     public func load() -> [LapKey: [LapRecord]] {
         if let cache { return cache }
-        var loaded: [LapKey: [LapRecord]] = [:]
-        if let fileURL, FileManager.default.fileExists(atPath: fileURL.path) {
-            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-            if let data = try? SavedStoreFile.contents(of: fileURL, limit: Self.maximumFileBytes),
-               let stored = try? decoder.decode([Stored].self, from: data) {
-                // A decodable file still gets the bounds the book keeps when it writes.
-                for entry in stored { loaded[entry.key, default: []] += entry.laps }
-                loaded = Self.bounded(loaded.mapValues(Self.normalized))
-            } else {
-                _ = try? SavedStoreFile.moveAside(fileURL)
-            }
-        }
+        guard var loaded = readFile() else { return unsaved }
+        for (key, laps) in unsaved { loaded[key] = Self.normalized((loaded[key] ?? []) + laps) }
+        loaded = Self.bounded(loaded)
+        unsaved = [:]
         cache = loaded
         return loaded
+    }
+
+    /// The saved book, empty when there is none or it was unusable, or nil when reading failed.
+    /// Like the history store, only a file that is too large or cannot be decoded is set aside;
+    /// a read error may be transient, so the file stays for a later attempt.
+    private func readFile() -> [LapKey: [LapRecord]]? {
+        guard let fileURL, FileManager.default.fileExists(atPath: fileURL.path) else { return [:] }
+        let data: Data?
+        do { data = try SavedStoreFile.contents(of: fileURL, limit: Self.maximumFileBytes) } catch { return nil }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        guard let data, let stored = try? decoder.decode([Stored].self, from: data) else {
+            _ = try? SavedStoreFile.moveAside(fileURL)
+            return [:]
+        }
+        // A decodable file still gets the bounds the book keeps when it writes.
+        var loaded: [LapKey: [LapRecord]] = [:]
+        for entry in stored { loaded[entry.key, default: []] += entry.laps }
+        return loaded.mapValues(Self.normalized)
     }
 
     /// Adds a finished run unless the same job is already recorded, and returns the updated book.
@@ -48,6 +61,10 @@ public actor LapBook {
         guard !laps.contains(where: { $0.jobID == lap.jobID }) else { return book }
         book[key] = Self.normalized(laps + [lap])
         book = Self.bounded(book)
+        guard cache != nil else {
+            unsaved = book
+            return book
+        }
         cache = book
         save(book)
         return book

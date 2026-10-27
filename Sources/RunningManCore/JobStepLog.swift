@@ -68,11 +68,14 @@ public struct JobStepLog: Sendable, Equatable {
     /// Changes whenever the steps or their output change.
     public let revision: Int
     public let steps: [JobStep]
+    /// True once the worker log reported the job's result and its timeline was read without a
+    /// gap, so every step's timing is known. The listener log can report the job finished first.
+    public let isComplete: Bool
 
     public init(jobID: String, runnerID: String, isFinished: Bool, hasOutput: Bool, isTruncated: Bool,
-                revision: Int, steps: [JobStep]) {
+                revision: Int, steps: [JobStep], isComplete: Bool? = nil) {
         self.jobID = jobID; self.runnerID = runnerID; self.isFinished = isFinished; self.hasOutput = hasOutput
-        self.isTruncated = isTruncated; self.revision = revision; self.steps = steps
+        self.isTruncated = isTruncated; self.revision = revision; self.steps = steps; self.isComplete = isComplete ?? isFinished
     }
 }
 
@@ -92,12 +95,16 @@ struct JobStepTimeline {
     let jobID: String
     private(set) var entries: [Entry]
     private(set) var isFinished = false
+    /// Set when part of the worker log was skipped, so steps may be missing or merged.
+    private(set) var hasGap = false
     private var isCompleting = false
 
     init(jobID: String, startedAt: Date) {
         self.jobID = jobID.lowercased()
         entries = [Entry(name: Self.setUpName, startedAt: startedAt, finishedAt: nil, outcome: .running)]
     }
+
+    mutating func markGap() { hasGap = true }
 
     /// Applies one timestamped worker log line and returns whether the timeline changed.
     ///

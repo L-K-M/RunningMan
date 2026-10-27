@@ -68,6 +68,8 @@ public actor RunnerLogMonitor {
     private var stepTimelines: [String: JobStepTimeline] = [:]
     private var outputCaptures: [String: JobOutputCapture] = [:]
     private var stepLogs: [String: JobStepLog] = [:]
+    /// Finished jobs a newer job replaced during the current scan; see `LogScanResult.finishedStepLogs`.
+    private var displacedStepLogs: [JobStepLog] = []
     private var changedStepRunners = Set<String>()
     private var stepRevision = 0
     private let formatter = ISO8601DateFormatter()
@@ -81,6 +83,7 @@ public actor RunnerLogMonitor {
     public init() {}
 
     public func scan(runners: [InstalledRunner]) -> LogScanResult {
+        displacedStepLogs = []
         var warnings: [String] = []
         var events: [ActivityEvent] = []
         var livePaths = Set<String>()
@@ -143,6 +146,11 @@ public actor RunnerLogMonitor {
                         cursor.pendingID = nil; cursor.activeID = nil
                         cursor.discardsFragment = true; cursor.suppressesUntimestamped = true
                         cursor.offset = log.size - UInt64(DiagnosticLogLimits.tailWindow)
+                        // The steps between the header and the tail are never read for this job.
+                        if let workerID = cursor.workerID, let timeline = stepTimelines[runner.id],
+                           jobKey(runner: context, id: timeline.jobID) == workerID {
+                            stepTimelines[runner.id]?.markGap()
+                        }
                         warnings.append("Older details in \(runner.name)’s large log were skipped; retained job history stays available.")
                     }
                     cursor.seen = true
@@ -179,7 +187,20 @@ public actor RunnerLogMonitor {
             resultSources = resultSources.filter { jobs[$0.key] != nil }
         }
         return LogScanResult(jobs: jobs.values.sorted { $0.startedAt > $1.startedAt },
-            events: events, warnings: Array(Set(warnings)).sorted(), tails: tails, stepLogs: stepLogs)
+            events: events, warnings: Array(Set(warnings)).sorted(), tails: tails, stepLogs: stepLogs,
+            finishedStepLogs: displacedStepLogs)
+    }
+
+    /// Keeps the steps of a finished job whose timeline the next job replaces before this scan
+    /// publishes it. Runners often start a queued job within a second of the last one ending.
+    private func keepDisplaced(_ timeline: JobStepTimeline, runner: LogRunnerContext) {
+        guard timeline.isFinished, !timeline.hasGap else { return }
+        let capture = outputCaptures[runner.id].flatMap { $0.jobID == timeline.jobID ? $0 : nil }
+        stepRevision += 1
+        displacedStepLogs.append(JobStepLog(jobID: jobKey(runner: runner, id: timeline.jobID), runnerID: runner.id, isFinished: true,
+            hasOutput: false, isTruncated: false, revision: stepRevision,
+            steps: JobStepAssembler.steps(entries: timeline.entries, lines: [], stepStarts: capture?.stepStarts ?? [], isFinished: true),
+            isComplete: true))
     }
 
     /// Reads new output of the runner's most recent job and reassembles its steps when anything changed.
@@ -203,7 +224,8 @@ public actor RunnerLogMonitor {
         stepLogs[runner.id] = JobStepLog(jobID: jobID, runnerID: runner.id, isFinished: isFinished,
             hasOutput: capture.hasOutput, isTruncated: capture.isTruncated, revision: stepRevision,
             steps: JobStepAssembler.steps(entries: timeline.entries, lines: capture.lines,
-                                          stepStarts: capture.stepStarts, isFinished: isFinished))
+                                          stepStarts: capture.stepStarts, isFinished: isFinished),
+            isComplete: timeline.isFinished && !timeline.hasGap)
     }
 
     private func consume(_ data: Data, cursor: inout Cursor, runner: LogRunnerContext, events: inout [ActivityEvent]) {
@@ -293,6 +315,7 @@ public actor RunnerLogMonitor {
         }
         if line.containsBytes("JobRunner] Job ID "), let id = capture(#"JobRunner\] Job ID ([A-Za-z0-9-]+)"#, line) {
             if stepTimelines[runner.id]?.jobID != id.lowercased() {
+                if let previous = stepTimelines[runner.id] { keepDisplaced(previous, runner: runner) }
                 stepTimelines[runner.id] = JobStepTimeline(jobID: id, startedAt: date)
                 changedStepRunners.insert(runner.id)
             }
