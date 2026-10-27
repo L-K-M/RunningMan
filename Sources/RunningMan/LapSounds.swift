@@ -53,6 +53,9 @@ final class LapSounds: @unchecked Sendable {
         if restarting {
             // Sounds are a nicety: without an output device the track simply stays quiet.
             do { try engine.start() } catch { return }
+            // An engine a device change stopped may leave sounds queued on the player; they
+            // would play late, ahead of this one.
+            player.stop()
             scheduledUntil = now
         }
         player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)

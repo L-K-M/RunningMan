@@ -119,7 +119,7 @@ struct LapCard: View {
             }
             .onChange(of: job.id) { _, _ in selected = nil }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Lap against \(reference?.pace.title.lowercased() ?? (model.hasEarlierRuns(of: job) ? "no successful run" : "no earlier run"))")
+            .accessibilityLabel("Lap against \(reference?.pace.title.lowercased() ?? (model.hasEarlierRuns(of: job) ? "no successful run yet" : "no earlier run"))")
             .accessibilityValue(accessibilityValue(progress(reference, at: Date())))
             .accessibilityHint(hasJobLog ? "Adjust to step through the job's steps. Press Return to open the selected step in the job log."
                                          : "Adjust to step through the job's steps.")
