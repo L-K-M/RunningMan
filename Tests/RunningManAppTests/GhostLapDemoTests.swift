@@ -127,6 +127,7 @@ final class GhostLapDemoTests: XCTestCase {
         XCTAssertNotNil(job?.finishedAt, "An interrupted run must not stay Running in History")
         XCTAssertEqual(model.stepLogs[runnerID]?.isFinished, true)
         XCTAssertEqual(model.runners[0].status, .stopped)
+        XCTAssertTrue(model.lingeringJobIDs.contains("demo-job-0"), "The cancelled run leaves the card after its linger")
     }
 
     @MainActor func testDisablingTheRaceRunnerEndsItsRun() async throws {
@@ -155,5 +156,13 @@ final class GhostLapDemoTests: XCTestCase {
     func testFinishRanksReadAsOrdinals() {
         XCTAssertEqual([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111, 112].map(LapCaption.ordinal),
                        ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd", "101st", "111th", "112th"])
+    }
+
+    @MainActor func testARemovedRaceRunnerIsNotReplacedByAnother() {
+        let model = AppModel(demoMode: true)
+        model.runners.remove(at: 0)
+        model.startDemoRace()
+        defer { model.demoRaceTask?.cancel() }
+        XCTAssertNil(model.demoRaceTask, "The race belongs to the runner of the opening job")
     }
 }

@@ -112,8 +112,8 @@ struct LapCard: View {
                 return .handled
             }
             .onKeyPress(characters: CharacterSet(charactersIn: "gG")) { press in
-                // Command-G and other shortcuts pass through; Shift only makes the capital.
-                guard press.modifiers.subtracting(.shift).isEmpty else { return .ignored }
+                // Command-G and other shortcuts pass through; Shift and Caps Lock only make the capital.
+                guard press.modifiers.isDisjoint(with: [.command, .control, .option]) else { return .ignored }
                 model.ghostPace = model.ghostPace.next
                 return .handled
             }

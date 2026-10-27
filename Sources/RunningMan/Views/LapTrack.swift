@@ -110,9 +110,10 @@ final class LapMotion {
     private var velocity: Double = 0
     private var lastTarget: Double = 0
     private var lastFrame: Date?
-    /// Set while the runner is clearly behind the ghost; a pass needs it first, so one pass is
-    /// called out once however slowly the spring then glides past.
+    /// Set while the readout says behind; a pass needs it first, so one pass is called out once
+    /// however slowly the spring then glides past.
     private var wasBehind = false
+    private var hasEnded = false
     private var referenceID: String?
     private var finishedSectors: Set<Int> = []
     private var outcome: LapProgress.Outcome = .running
@@ -164,12 +165,14 @@ final class LapMotion {
                 if split < -LapProgress.splitThreshold { surgingUntil = now.addingTimeInterval(0.7) }
             }
         }
-        // Judged on the race, not the spring, so overshoot cannot fake a pass and a slow glide
-        // cannot miss one. A ghost waiting at the line is caught, not passed.
-        if progress.total > 0, progress.outcome == .running || progress.outcome == .success {
-            if progress.ghost - progress.live > Self.behind {
+        // Judged on the lead the readout shows, not on the spring or the figure waiting at the
+        // end of a step, so a pass is called out exactly when "behind" turns to "ahead". A ghost
+        // waiting at the line is caught, not passed.
+        hasEnded = progress.hasEnded
+        if progress.total > 0, progress.reference != nil, progress.outcome == .running || progress.outcome == .success {
+            if progress.lead >= Self.shownLead {
                 wasBehind = true
-            } else if wasBehind, progress.live >= progress.ghost, progress.ghost < progress.total {
+            } else if wasBehind, progress.lead <= -Self.shownLead, progress.ghost < progress.total {
                 wasBehind = false
                 events.append(.overtake)
                 passedAt = now
@@ -196,13 +199,14 @@ final class LapMotion {
         }
     }
 
-    /// How far behind the ghost counts as behind, in reference seconds.
-    private static let behind = 0.4
+    /// The readout rounds the lead to whole seconds, so this is where it stops saying level.
+    private static let shownLead = 0.5
 
     /// Takes the race as it stands without calling anything out.
     private func seed(_ progress: LapProgress) {
         referenceID = Self.identity(of: progress.reference)
-        wasBehind = progress.total > 0 && progress.ghost - progress.live > Self.behind
+        wasBehind = progress.total > 0 && progress.lead >= Self.shownLead
+        hasEnded = progress.hasEnded
         finishedSectors = Set(progress.sectors.filter { if case .finished = $0.state { return true } else { return false } }.map(\.id))
     }
 
@@ -212,9 +216,9 @@ final class LapMotion {
 
     func surging(at now: Date) -> Bool { surgingUntil.map { now < $0 } ?? false }
 
-    /// A finished race whose finish has played out draws the same frame from then on.
+    /// A job that has ended and whose finish has played out draws the same frame from then on.
     func isSettled(at now: Date) -> Bool {
-        outcome != .running && particles.isEmpty && shownLive == lastTarget && !wantsSmoothFrames(at: now)
+        hasEnded && outcome != .running && particles.isEmpty && shownLive == lastTarget && !wantsSmoothFrames(at: now)
     }
 
     /// Smooth frames are needed only while something moves quickly: the surge spring, the
@@ -318,6 +322,18 @@ private final class LapFrameView: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    // A settled track asks for no frames, so a new size or appearance has to ask for one.
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = newSize != frame.size
+        super.setFrameSize(newSize)
+        if changed { needsDisplay = true }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func isAccessibilityElement() -> Bool { false }

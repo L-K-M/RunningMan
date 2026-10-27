@@ -179,7 +179,7 @@ final class GhostLapTests: XCTestCase {
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
 
-    func testAnUnreadableLapBookIsSetAsideAndStartsEmpty() async throws {
+    func testAnUndecodableLapBookIsSetAsideAndStartsEmpty() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("lapbook-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

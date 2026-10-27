@@ -1,7 +1,8 @@
 import Foundation
 
 /// Step times of finished runs, kept per job so a new run can race its ghost. Private, bounded
-/// and written atomically like the job history; an unreadable file is set aside, never deleted.
+/// and written atomically like the job history. A file that cannot be decoded is set aside, never
+/// deleted; one that cannot be read is left alone while new laps wait in memory.
 public actor LapBook {
     private struct Stored: Codable {
         var key: LapKey

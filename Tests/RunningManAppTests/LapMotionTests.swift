@@ -95,4 +95,34 @@ final class LapMotionTests: XCTestCase {
         }
         XCTAssertTrue(motion.isSettled(at: start.addingTimeInterval(64.2)))
     }
+
+    func testARunLevelWithItsGhostIsNoPassWhenAStepEndsOnTime() {
+        let motion = LapMotion()
+        let reference = reference()  // 3, 50, 20
+        func run(buildDone: Bool) -> [JobStep] {
+            [JobStep(id: 0, name: "Set up job", startedAt: start, finishedAt: start.addingTimeInterval(3), outcome: .success, lines: []),
+             JobStep(id: 1, name: "Build", startedAt: start.addingTimeInterval(3), finishedAt: buildDone ? start.addingTimeInterval(52.8) : nil,
+                     outcome: buildDone ? .success : .running, lines: [])]
+                + (buildDone ? [JobStep(id: 2, name: "Test", startedAt: start.addingTimeInterval(52.8), finishedAt: nil, outcome: .running, lines: [])] : [])
+        }
+        // The figure waits at 98% of the build while the readout stays level; the build ends on time.
+        var events: [LapEvent] = []
+        for frameIndex in 0...40 {
+            let seconds = 50 + Double(frameIndex) / 8
+            events += frame(motion, at: seconds, reference: reference, steps: run(buildDone: seconds >= 52.8))
+        }
+        XCTAssertFalse(events.contains(.overtake), "Nothing passed: the readout never left level")
+    }
+
+    func testAFailedJobStillCleaningUpKeepsDrawingItsGhost() {
+        let motion = LapMotion()
+        let reference = reference()
+        let failing = [JobStep(id: 0, name: "Set up job", startedAt: start, finishedAt: start.addingTimeInterval(3), outcome: .success, lines: []),
+                       JobStep(id: 1, name: "Build", startedAt: start.addingTimeInterval(3), finishedAt: start.addingTimeInterval(20), outcome: .failure, lines: []),
+                       JobStep(id: 2, name: "Upload logs", startedAt: start.addingTimeInterval(20), finishedAt: nil, outcome: .running, lines: [])]
+        for frameIndex in 0...80 {
+            _ = frame(motion, at: 20 + Double(frameIndex) / 8, reference: reference, steps: failing)
+        }
+        XCTAssertFalse(motion.isSettled(at: start.addingTimeInterval(30)), "The ghost still runs until the job ends")
+    }
 }

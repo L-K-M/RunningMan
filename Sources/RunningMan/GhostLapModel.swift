@@ -192,6 +192,7 @@ extension AppModel {
         jobs[index].name = Self.demoRaceJobName
         jobs[index].workflow = Self.demoRaceWorkflow
         jobs[index].startedAt = start
+        jobs[index].runnerID = runners[0].id
         runners[0].currentJob = jobs[index]
         stepLogs[runners[0].id] = Self.demoRaceLog(Self.demoRaces[0], jobID: Self.demoRaceOpeningJobID, runnerID: runners[0].id, start: start, now: now)
     }
@@ -236,7 +237,10 @@ extension AppModel {
     /// its run as cancelled; a stopped or disabled runner races again once it is started, and a
     /// removed one ends the race.
     func startDemoRace() {
-        guard demoMode, demoRaceTask == nil, SnapshotCapture.destination == nil, let runnerID = runners.first?.id else { return }
+        // The race belongs to the runner of the opening job; once that runner is removed, none races.
+        guard demoMode, demoRaceTask == nil, SnapshotCapture.destination == nil,
+              let runnerID = jobs.first(where: { $0.id == Self.demoRaceOpeningJobID })?.runnerID,
+              runners.contains(where: { $0.id == runnerID }) else { return }
         demoRaceRunnerID = runnerID
         demoRaceTask = Task { [weak self] in
             var run = 0
@@ -338,5 +342,7 @@ extension AppModel {
         if let index = runners.firstIndex(where: { $0.id == runnerID }), runners[index].currentJob?.id == jobID {
             runners[index].currentJob = nil
         }
+        // As for a finish: the lap is kept and the card leaves after its linger.
+        recordFinishedLaps()
     }
 }

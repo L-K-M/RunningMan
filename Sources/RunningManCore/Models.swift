@@ -201,8 +201,9 @@ public struct LogScanResult: Sendable {
     public var tails: [String: String]
     /// The most recent job's steps and output per runner ID; GitHub runners only.
     public var stepLogs: [String: JobStepLog]
-    /// Complete step timelines of jobs that finished and were replaced by a newer job on the same
-    /// runner within this scan, so they never appeared in `stepLogs`. Steps only, no output.
+    /// Complete step timelines of finished jobs that a newer job on the same runner replaced
+    /// during this scan. Most never appeared finished in `stepLogs`; one that did is reported
+    /// again, so consumers act on each job once. Steps only, no output.
     public var finishedStepLogs: [JobStepLog]
     public init(jobs: [RunnerJob] = [], events: [ActivityEvent] = [], warnings: [String] = [], tails: [String: String] = [:],
                 stepLogs: [String: JobStepLog] = [:], finishedStepLogs: [JobStepLog] = []) {

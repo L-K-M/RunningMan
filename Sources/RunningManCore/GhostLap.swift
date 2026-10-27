@@ -248,6 +248,9 @@ public struct LapProgress: Sendable, Equatable {
     public let currentSector: Int?
     public let failedSector: Int?
     public let reference: LapReference?
+    /// True once the job itself has ended. A failed step decides the outcome at once, but the
+    /// clock and the ghost run on while cleanup steps do.
+    public var hasEnded = false
 
     public var isFinished: Bool { outcome != .running }
 
@@ -349,7 +352,7 @@ public struct LapProgress: Sendable, Equatable {
         return LapProgress(sectors: sectors, total: total, elapsed: elapsed, live: live, ghost: total > 0 ? min(elapsed, total) : 0,
                            lead: reference == nil ? 0 : elapsed - position,
                            remaining: reference == nil || isFinished ? nil : remaining, outcome: outcome,
-                           currentSector: current, failedSector: failed, reference: reference)
+                           currentSector: current, failedSector: failed, reference: reference, hasEnded: isFinished)
     }
 
     /// Without step times the ghost paces the whole job; the runner holds just short of the line.
@@ -378,7 +381,7 @@ public struct LapProgress: Sendable, Equatable {
         return LapProgress(sectors: [sector], total: total, elapsed: elapsed, live: live, ghost: min(elapsed, total),
                            lead: elapsed - position, remaining: outcome == .running ? max(total - elapsed, total * 0.15) : nil,
                            outcome: outcome, currentSector: outcome == .running ? 0 : nil, failedSector: outcome == .failure ? 0 : nil,
-                           reference: reference)
+                           reference: reference, hasEnded: isFinished)
     }
 }
 
