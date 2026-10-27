@@ -22,7 +22,7 @@ The preview above uses fictional runners and jobs.
 - **Create and remove.** Register a repository or organization runner from its GitHub URL, download and verify the official runner, and install its user service. Unregister existing runners without deleting their workspaces.
 - **Job history.** Search and filter locally recorded jobs, see outcomes and durations, and jump to their GitHub run when its URL is available.
 - **Job log.** Follow a GitHub runner's current job step by step, like the log on GitHub, read from the runner's local files with secrets redacted.
-- **Ghost lap.** Watch a running job race a ghost of its usual run: whether it is ahead or behind, which step is slow, and when it should be done.
+- **Ghost lap.** Watch a GitHub runner's job race a ghost of its usual run: whether it is ahead or behind, which step is slow, and when it should be done.
 - **Live diagnostics.** Search and follow redacted logs, reveal installations in Finder, and export a diagnostic report.
 - **Menu-bar access.** Check the fleet and manage runners even after closing the main window.
 - **Desktop widgets.** See runner availability and recorded job results in small or medium widgets.

@@ -3,9 +3,10 @@
 Design note and retrospective for the `claude/ghost-lap` prototype.
 
 To try it, build with `scripts/build-app.sh` and open the preview workspace:
-`open dist/RunningMan.app --args --demo`. Quit an installed RunningMan first; both
-builds share a bundle identifier. The demo opens mid-race; select `studio-release`
-under Runners, or watch the lanes on the Overview.
+`open dist/RunningMan.app --args --demo`. `open` passes the arguments only when it
+launches the app, so quit any running RunningMan first, installed or built earlier; they
+share a bundle identifier. The demo opens mid-race; select `studio-release` under
+Runners, or watch its lane on the Overview.
 
 ## Design note
 
@@ -23,12 +24,14 @@ ghost of your usual lap, sector splits, purple for a personal best.
 **Before.** The runner's card shows a lane. Each step is a sector sized by its usual
 duration, ending in a checkered line. A translucent ghost waits at the start.
 
-**During.** The ghost runs the usual lap at constant speed. The live runner keeps the
+**During.** The ghost runs the usual lap, each step's median over the last 20 successful
+runs, at constant speed. The live runner keeps the
 ghost's pace inside a running step but never crosses into the next sector until the
 step really finishes. When it does, the runner surges to the boundary on a spring, with
 speed lines, and the sector is painted by its split: soft green on pace, green faster,
-orange slower, purple for a personal best. A large readout gives the lead (+0:13
-behind, −0:01 ahead); the caption names the step against its usual time and says
+orange slower, purple for a personal best. A large readout says how far the runner is
+from the ghost (+0:13 behind, −0:01 ahead); the caption names the step against its usual
+time and says
 "Done about 22:12".
 
 **After.** The tape snaps, the figure throws its arms up, a short confetti burst, and
@@ -119,12 +122,13 @@ The execution keeps one vocabulary:
   a setting to turn it off.
 - **Keyboard and VoiceOver.** Tab reaches the track; arrows select a step and show its
   history; Return opens the job log at that step; G switches the ghost between usual,
-  best and last run; Escape clears. VoiceOver reads one adjustable element: "Lap
-  against usual. 13 s behind. Step 5 of 10, Build app bundle, 33 s of usually 49 s.
-  Done about 22:12."
-- **Honesty.** Only successful runs make a ghost. With fewer than three, it replays the
-  last run and claims no bests. A job without step logs, such as a Forgejo job, is paced
-  as a whole and shows the time left. A first run says so and shows elapsed time.
+  best and last run; Escape clears. VoiceOver gets one adjustable element whose label
+  and value read "Lap against usual. 13 s behind. Step 5 of 10, Build app bundle, 33 s
+  of usually 49 s. Done about 22:12." (not yet heard spoken; see the retrospective).
+- **Honesty.** Only successful runs make a ghost. With fewer than three successful
+  runs, it replays the last one and claims no bests. A job without step times is paced
+  as a whole from history and shows the time left. Forgejo runners keep no local record
+  of a running job, so their jobs get no lap. A first run says so and shows elapsed time.
 
 ### What I deliberately did not do
 
@@ -132,8 +136,8 @@ The execution keeps one vocabulary:
   words of copy, "Running now".
 - No percentage bar and no second-precise estimate. Step times vary; "Done about" is
   rounded to the minute.
-- The runner never gets ahead of the log. Gliding through unfinished steps would look
-  smoother and be false.
+- The runner never crosses into a step the log has not reached. Gliding through steps
+  that have not started would look smoother and be false.
 - No new animation in lists, the sidebar or the menu bar. One moving thing per screen.
 - No leaderboards, sharing, streaks or badges. A personal best is a quiet purple.
 - No sound in the background, and none that a failure could startle you with.
@@ -158,10 +162,12 @@ second and pacing the demo's log writes like live refreshes brought it to 6 to 7
 capture also showed a 0.9 s stall at the finish: the audio engine started on the main
 thread for the chime. Sounds now play from their own queue.
 
-A Codex review (gpt-6.1-sol) found eight real defects in edge cases, among them a
-cancelled job that could celebrate a finish and a store that trusted its file. All are
-fixed with regression tests. A Kimi K3 run meant to propose independent concepts
-produced no output and was stopped.
+A Codex review (gpt-6.1-sol) found eight edge-case defects, such as a cancelled job
+celebrating a finish. On the PR, a multi-agent review and the repository's GLM reviewer
+found deeper ones: splits that left out the time between steps, so every run read a few
+seconds behind; partial logs recorded as laps; lost laps for back-to-back jobs; and a
+demo Forgejo lane that live mode cannot produce. All are fixed with regression tests. A
+Kimi K3 concept run produced nothing and was stopped.
 
 Not verified: VoiceOver speech (the accessibility tree was not reachable in-process;
 labels and values are set and the adjustable action is wired); hover, because
