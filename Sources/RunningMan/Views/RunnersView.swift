@@ -118,6 +118,8 @@ struct RunnerDetailView: View {
     @Environment(AppModel.self) private var model
     let snapshot: RunnerSnapshot
     @State private var tab = "Overview"
+    /// The step the job log should open at, chosen on the lap track.
+    @State private var jobLogFocus: Int?
     @State private var logSearch = ""
     @State private var followLog = true
     private var runner: InstalledRunner { snapshot.runner }
@@ -183,10 +185,12 @@ struct RunnerDetailView: View {
                     Text("Live log").tag("Live log")
                     Text("Jobs (\(model.jobCount(for: snapshot.id)))").tag("Jobs")
                 }.pickerStyle(.segmented).labelsHidden()
+                    // A step chosen on the track opens the job log once, not on every later visit.
+                    .onChange(of: tab) { _, tab in if tab != "Job log" { jobLogFocus = nil } }
             }.padding(24)
             Divider()
             switch tab {
-            case "Job log": JobLogView(snapshot: snapshot)
+            case "Job log": JobLogView(snapshot: snapshot, focusStep: jobLogFocus)
             case "Live log": logView
             case "Jobs": jobsView
             default: overview
@@ -197,31 +201,10 @@ struct RunnerDetailView: View {
     private var overview: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                if let job = snapshot.currentJob {
-                    Surface {
-                        Label("WORKING NOW", systemImage: "bolt.fill").font(.system(size: 10, weight: .bold)).tracking(1).foregroundStyle(StatusTone.active.text)
-                        Text(job.name).font(.system(size: 16, weight: .semibold)).padding(.top, 8)
-                        HStack {
-                            Text(job.repository ?? runner.repository).lineLimit(1)
-                            Spacer()
-                            if job.outcome == .running {
-                                Text(job.startedAt, style: .timer).monospacedDigit()
-                            } else {
-                                Text(formattedDuration(for: job)).monospacedDigit()
-                                    .help(job.finishedAt == nil ? "No completion result in local logs" : "Recorded job duration")
-                            }
-                        }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 3)
-                        if let step = model.stepLogs[snapshot.id].flatMap({ $0.jobID == job.id ? $0.steps.last { $0.outcome == .running } : nil }) {
-                            Button { tab = "Job log" } label: {
-                                Label("Current step: \(step.name)", systemImage: "list.bullet.rectangle").lineLimit(1)
-                            }.buttonStyle(.link).font(.system(size: 11)).padding(.top, 6).help("Show the job log")
-                        }
-                        if isControllable {
-                            Button(model.drainingRunnerIDs.contains(snapshot.id) ? "Cancel stop when idle" : "Stop when idle", systemImage: "moon.zzz") { model.perform(.drain, on: snapshot) }
-                                .controlSize(.small).padding(.top, 11)
-                                .disabled(isActing)
-                                .help("Stop after this job finishes. Keep RunningMan open until the runner stops.")
-                        }
+                if let job = model.lapJob(for: snapshot.id) {
+                    LapCard(snapshot: snapshot, job: job, isControllable: isControllable, isActing: isActing) { step in
+                        jobLogFocus = step
+                        tab = "Job log"
                     }
                 }
                 if let detail = snapshot.detail, !detail.isEmpty {

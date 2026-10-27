@@ -6,6 +6,8 @@ import SwiftUI
 struct JobLogView: View {
     @Environment(AppModel.self) private var model
     let snapshot: RunnerSnapshot
+    /// A step to open and scroll to, for example one chosen on the lap track.
+    var focusStep: Int?
     /// Steps the user opened or closed; others follow the default (open while running or failed).
     @State private var stepExpansion: [Int: Bool] = [:]
     @State private var openGroups: Set<Int> = []
@@ -63,7 +65,12 @@ struct JobLogView: View {
                 }
                 .background(.primary.opacity(0.02))
                 .onChange(of: log.revision) { _, _ in scrollToNewest(log, proxy: proxy) }
-                .onAppear { scrollToNewest(log, proxy: proxy) }
+                .onAppear {
+                    guard let focusStep, log.steps.contains(where: { $0.id == focusStep }) else { scrollToNewest(log, proxy: proxy); return }
+                    followOutput = false
+                    stepExpansion[focusStep] = true
+                    DispatchQueue.main.async { proxy.scrollTo("step-\(focusStep)", anchor: .top) }
+                }
             }
             Divider()
             HStack {

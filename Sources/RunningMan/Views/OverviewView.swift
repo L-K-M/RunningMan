@@ -9,6 +9,7 @@ struct OverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 fleetSummary
+                LapLanes()
                 MetricRow {
                     MetricTile(title: "Runners online", value: "\(model.runningCount)", footnote: "of \(model.runners.count) installed", symbol: "play.circle", tint: StatusTone.positive.text)
                     MetricTile(title: "Busy runners", value: "\(model.busyCount)", footnote: "with at least one active job", symbol: "bolt.fill", tint: StatusTone.active.text)

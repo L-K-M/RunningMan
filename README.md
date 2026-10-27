@@ -22,6 +22,7 @@ The preview above uses fictional runners and jobs.
 - **Create and remove.** Register a repository or organization runner from its GitHub URL, download and verify the official runner, and install its user service. Unregister existing runners without deleting their workspaces.
 - **Job history.** Search and filter locally recorded jobs, see outcomes and durations, and jump to their GitHub run when its URL is available.
 - **Job log.** Follow a GitHub runner's current job step by step, like the log on GitHub, read from the runner's local files with secrets redacted.
+- **Ghost lap.** Watch a GitHub runner's job race a ghost of its usual run: whether it is ahead or behind, which step is slow, and when it should be done.
 - **Live diagnostics.** Search and follow redacted logs, reveal installations in Finder, and export a diagnostic report.
 - **Menu-bar access.** Check the fleet and manage runners even after closing the main window.
 - **Desktop widgets.** See runner availability and recorded job results in small or medium widgets.
@@ -153,7 +154,7 @@ The **Cleanup** section reads reports written by participating release workflows
 
 The reports live in the runner work directory's **.runningman-cleanup/** folder. RunningMan reads bounded, validated reports and never deletes files through this view. A pending report is not proof of a running job or successful removal: power loss or a force-killed runner can prevent the final step. Old releases without reports show no cleanup evidence. Sizes represent logical file contents removed, rather than measured free space on APFS. See [the workflow integration guide](docs/release-cleanup.md) to add this to another repository.
 
-History is recovered from available local Runner and Worker diagnostics, then saved in **~/Library/Application Support/RunningMan/**. It is not a complete GitHub audit log. Rotated or deleted diagnostics cannot recover jobs that RunningMan has never seen.
+History is recovered from available local Runner and Worker diagnostics, then saved in **~/Library/Application Support/RunningMan/**. It is not a complete GitHub audit log. Rotated or deleted diagnostics cannot recover jobs that RunningMan has never seen. The step times of finished jobs are kept there too, at most 20 runs per job, so the next run can race them.
 
 Unfinished jobs without evidence of a current worker show **Unknown**, with no invented completion time. Records with confirmed outcomes keep them when older logs are scanned again. Up to 2,000 jobs and 500 activity events are retained, with bounded log tails and incremental background reads.
 
