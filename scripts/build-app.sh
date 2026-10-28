@@ -62,9 +62,15 @@ for arch in $widget_archs; do
   load_commands="$(otool -arch "$arch" -l "$widget_binary")"
   text_address="$(awk '$1 == "segname" && $2 == "__TEXT" { getline; print $2; exit }' <<<"$load_commands")"
   entry_offset="$(awk '$1 == "entryoff" { print $2; exit }' <<<"$load_commands")"
+  if [ -z "$text_address" ] || [ -z "$entry_offset" ]; then
+    echo "otool showed no __TEXT address or LC_MAIN entry for the $arch widget extension." >&2
+    exit 1
+  fi
   entry_address="$(printf '0x%016x' $((text_address + entry_offset)))"
-  if ! otool -arch "$arch" -Iv "$widget_binary" | awk -v address="$entry_address" '$1 == address && $3 == "_NSExtensionMain" { found = 1 } END { exit !found }'; then
-    echo "The $arch widget extension does not start at _NSExtensionMain; check its linker flags in Package.swift." >&2
+  # Assigned rather than piped, so an otool failure stops the build as itself.
+  indirect_symbols="$(otool -arch "$arch" -Iv "$widget_binary")"
+  if ! awk -v address="$entry_address" '$1 == address && $3 == "_NSExtensionMain" { found = 1 } END { exit !found }' <<<"$indirect_symbols"; then
+    echo "The $arch widget extension starts at $entry_address, not _NSExtensionMain; check its linker flags in Package.swift." >&2
     exit 1
   fi
 done
