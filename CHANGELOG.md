@@ -14,6 +14,12 @@ All notable changes to this project are documented here. The format follows
   Forgejo services installed under the legacy `io.github.l-k-m` label prefix
   remain managed.
 
+### Fixed
+- The desktop widgets shipped in 1.3.0 and 1.4.0 never appeared in the widget
+  gallery: their extension started at SwiftPM's `main` and trapped in
+  ExtensionFoundation. It now starts at `NSExtensionMain` like Xcode-built
+  extensions, and `build-app.sh` refuses a build that does not.
+
 ## [1.0.0] - 2026-10
 
 ### Added

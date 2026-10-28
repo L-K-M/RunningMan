@@ -103,7 +103,10 @@ Missing, invalid, unsupported, oversized and linked files are unavailable. Demo
 mode and screenshot captures never publish snapshots or invalidate live widgets.
 
 `build-app.sh` builds and embeds the `.appex`, signs it before the host, and verifies
-nested signatures. Only the extension is sandboxed. Since distribution is ad-hoc
+nested signatures. It also checks that every architecture of the extension starts
+at `NSExtensionMain`, as Xcode links app extensions: one that starts at SwiftPM's
+`main` still registers but traps in ExtensionFoundation ("Unrecognized extension
+type"), so its widgets never appear. Only the extension is sandboxed. Since distribution is ad-hoc
 signed without provisioned App Groups, its home-relative read-only sandbox
 exception grants access solely to `Library/Application Support/RunningMan/Widgets/`.
 No network, subprocess, runner-file or credential access is granted. The host

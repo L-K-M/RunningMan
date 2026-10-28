@@ -48,6 +48,26 @@ cp "$binary_directory/RunningMan" "$app/Contents/MacOS/RunningMan"
 widget="$app/Contents/PlugIns/RunningManWidgets.appex"
 mkdir -p "$widget/Contents/MacOS"
 cp "$binary_directory/RunningManWidgets" "$widget/Contents/MacOS/RunningManWidgets"
+# The extension must start at NSExtensionMain, the entry point Xcode gives every
+# app extension. Started at SwiftPM's default main it still registers, but traps
+# in ExtensionFoundation ("Unrecognized extension type"); 1.3.0's widgets never
+# appeared. Store the slice list first: set -e ignores a failure inside a for list.
+widget_binary="$widget/Contents/MacOS/RunningManWidgets"
+widget_archs="$(lipo -archs "$widget_binary")"
+if [ -z "$widget_archs" ]; then
+  echo "lipo found no architectures in the widget extension." >&2
+  exit 1
+fi
+for arch in $widget_archs; do
+  load_commands="$(otool -arch "$arch" -l "$widget_binary")"
+  text_address="$(awk '$1 == "segname" && $2 == "__TEXT" { getline; print $2; exit }' <<<"$load_commands")"
+  entry_offset="$(awk '$1 == "entryoff" { print $2; exit }' <<<"$load_commands")"
+  entry_address="$(printf '0x%016x' $((text_address + entry_offset)))"
+  if ! otool -arch "$arch" -Iv "$widget_binary" | awk -v address="$entry_address" '$1 == address && $3 == "_NSExtensionMain" { found = 1 } END { exit !found }'; then
+    echo "The $arch widget extension does not start at _NSExtensionMain; check its linker flags in Package.swift." >&2
+    exit 1
+  fi
+done
 
 # Rebuild from the canonical PNG so a stale tracked ICNS never hides new artwork.
 swift "$project_root/scripts/make-icon.swift" "$app/Contents/Resources"
