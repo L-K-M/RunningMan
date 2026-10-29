@@ -25,6 +25,7 @@ The preview above uses fictional runners and jobs.
 - **Ghost lap.** Watch a GitHub runner's job race a ghost of its usual run: whether it is ahead or behind, which step is slow, and when it should be done.
 - **Live diagnostics.** Search and follow redacted logs, reveal installations in Finder, and export a diagnostic report.
 - **Menu-bar access.** Check the fleet and manage runners even after closing the main window.
+- **Background mode.** Open RunningMan at login in the menu bar, without its window or Dock icon. With automatic refresh on, the menu bar and widgets stay current.
 - **Desktop widgets.** See runner availability and recorded job results in small or medium widgets.
 - **Notifications.** Opt in to a notification when a job fails or succeeds, or when a runner stops without you stopping it. Click one to open that runner.
 - **Keep builds awake.** Optionally prevent idle sleep while a job is running. Closing the lid can still put a laptop to sleep.
@@ -140,9 +141,11 @@ and medium sizes:
   success, failure and cancellation outcomes, matching the dashboard.
 
 Click a widget to open Overview or Job history. Keep RunningMan open for new
-snapshots. macOS schedules widget updates, so they can lag behind the app. After
-15 minutes without a fresh snapshot, the widget labels its counts as cached and
-asks you to open the app. Missing or unreadable data shows **Stats unavailable**.
+snapshots: turn on **Open at login in the menu bar** in Settings to keep it
+running in the background. macOS schedules widget updates, so they can lag
+behind the app. After 15 minutes without a fresh snapshot, the widget labels its
+counts as cached and asks you to open the app. Missing or unreadable data shows
+**Stats unavailable**.
 
 The widget reads only aggregate counts from
 **~/Library/Application Support/RunningMan/Widgets/stats.json**. It never reads

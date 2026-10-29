@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - Small and medium desktop widgets for runner availability and recorded job results.
+- Background mode: open RunningMan at login in the menu bar, without its window or
+  Dock icon. With automatic refresh on, the menu bar and desktop widgets stay current.
 - Step-by-step job log for GitHub runners (#23)
 - Canonical `CLAUDE.md`, `CHANGELOG.md`, Dependabot for Actions, and the
   two-tier Z.ai review workflow. Bundle id moved to `ch.lkmc.RunningMan`;
