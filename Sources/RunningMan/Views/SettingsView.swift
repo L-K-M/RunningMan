@@ -5,12 +5,19 @@ import RunningManCore
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppUpdateChecker.self) private var updates
+    @Environment(BackgroundMode.self) private var backgroundMode
     @AppStorage(AppUpdateChecker.automaticKey) private var checkAutomatically = true
     /// The preview workspace never writes preferences, so its toggle changes only this copy.
     @State private var previewChecksAutomatically = true
     var body: some View {
         @Bindable var model = model
         Form {
+            Section {
+                Toggle("Open at login in the menu bar", isOn: Binding(get: { backgroundMode.isEnabled }, set: { backgroundMode.setEnabled($0) }))
+                Text("At login, RunningMan starts without its window. With automatic refresh on, it keeps the menu bar and desktop widgets up to date. Its Dock icon appears only while the window is open.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                backgroundModeStatus
+            } header: { Text("Background") }
             Section {
                 Toggle("Refresh runner status automatically", isOn: $model.refreshAutomatically)
                 Text("Refreshes local service state and diagnostic logs every 3 seconds while the RunningMan window or menu is open or a job is running, otherwise every 10 seconds while a runner is online and every minute while none is. Keeping this Mac awake and Low Power Mode adjust these intervals.")
@@ -103,6 +110,23 @@ struct SettingsView: View {
         .task { await model.refreshNotificationAuthorization() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.refreshNotificationAuthorization() }
+        }
+    }
+
+    @ViewBuilder private var backgroundModeStatus: some View {
+        if let failure = backgroundMode.failure {
+            Label("Could not change the login item: \(failure)", systemImage: "exclamationmark.triangle")
+                .font(.system(size: 11)).foregroundStyle(.orange)
+        } else if backgroundMode.needsApproval {
+            HStack {
+                Label("Allow RunningMan under Login Items in System Settings.", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+                Spacer()
+                Button("Open Login Items") { backgroundMode.openLoginItemsSettings() }.controlSize(.small)
+            }
+        } else if backgroundMode.mode == .preview {
+            Text("This preview workspace never changes your login items.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
         }
     }
 

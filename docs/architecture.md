@@ -113,6 +113,23 @@ No network, subprocess, runner-file or credential access is granted. The host
 remains unsandboxed for its existing launchd responsibilities. Widget URLs accept
 only navigation to Overview and Job history.
 
+## Background mode
+
+Background mode is RunningMan's own login item (`SMAppService.mainApp`), separate
+from the login policy of runner services. The login item is the only stored state:
+`BackgroundMode` reads its status again whenever RunningMan becomes active, and a
+change updates the Dock icon, so removing RunningMan under Login Items in System
+Settings turns the mode off. The preview workspace and
+snapshot captures keep the choice in memory.
+
+macOS launches a login item with `keyAELaunchedAsLogInItem`, and SwiftUI then opens
+no window, so nothing has to suppress one. With the mode on, the app delegate uses
+the accessory activation policy while the main window is closed and the regular one
+while it is open; a minimised window counts as open, because the Dock restores it.
+Reopening the app or following a widget link opens the main window as usual. The
+menu bar label hands `openWindow` to the delegate at launch, so a notification click
+or an alert can open the main window before any other scene has appeared.
+
 ## Notifications
 
 Notifications are opt-in per kind and off by default. A pure Core planner compares each refresh's runners and jobs with the previous refresh. A job notifies only when a record that was unfinished (or not yet seen) now has a completion time after monitoring started and within the last 15 minutes, so reparsing existing logs at launch or after clearing saved history stays quiet. Cancelled jobs follow the failure preference; unknown outcomes never notify. A runner notifies when a previously live process is positively observed stopped or disabled and you did not act on it in RunningMan in the previous 30 seconds; actions in flight and stop-after-job requests count as your action. Transitions to an unverified state, or from one without a live process, never notify. After a stop notification, the same runner stays quiet for 10 minutes, so a service that launchd keeps restarting does not post a banner each cycle. A bounded in-memory key set deduplicates notifications.

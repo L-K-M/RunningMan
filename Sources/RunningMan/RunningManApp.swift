@@ -7,6 +7,7 @@ import RunningManWidgetViews
 struct RunningManApp: App {
     @State private var model: AppModel
     @State private var updates: AppUpdateChecker
+    @State private var backgroundMode: BackgroundMode
     /// Follows the model from outside it, so frame ticks re-render only the menu bar label.
     @State private var menuBarAnimator: MenuBarAnimator
     @NSApplicationDelegateAdaptor(RunningManAppDelegate.self) private var delegate
@@ -17,14 +18,18 @@ struct RunningManApp: App {
         if model.demoMode { DemoLayoutPreferences.record() }
         // Demo data and snapshot captures stay offline and banner-free.
         let updates = AppUpdateChecker(mode: model.demoMode || SnapshotCapture.destination != nil ? .offline : .live)
+        let backgroundMode = BackgroundMode(mode: model.demoMode || SnapshotCapture.destination != nil ? .preview : .live)
         let animator = MenuBarAnimator(motion: SnapshotCapture.destination == nil ? .animated : .still)
         animator.follow(model)
         _model = State(initialValue: model)
         _updates = State(initialValue: updates)
+        _backgroundMode = State(initialValue: backgroundMode)
         _menuBarAnimator = State(initialValue: animator)
-        // The delegate starts both at launch, whether or not the main window appears.
+        // The delegate starts monitoring and update checks at launch, whether or not
+        // the main window appears, and applies background mode to the Dock icon.
         delegate.model = model
         delegate.updates = updates
+        delegate.backgroundMode = backgroundMode
     }
 
     var body: some Scene {
@@ -55,11 +60,13 @@ struct RunningManApp: App {
                 }
             }
         }
-        Settings { SettingsView().environment(model).environment(updates).tint(RunningManStyle.accent) }
+        Settings {
+            SettingsView().environment(model).environment(updates).environment(backgroundMode).tint(RunningManStyle.accent)
+        }
         MenuBarExtra {
             MenuPanelScene(delegate: delegate).environment(model)
         } label: {
-            MenuBarLabel(animator: menuBarAnimator)
+            MenuBarLabelScene(animator: menuBarAnimator, delegate: delegate)
         }
         .menuBarExtraStyle(.window)
     }
@@ -77,6 +84,7 @@ private struct MainWindowScene: View {
             .background(WindowIdentity())
             .onAppear {
                 delegate.sceneAppeared(openWindow: openWindow)
+                delegate.mainWindowAppeared()
                 // Occlusion notifications refine this; the first one can arrive
                 // before WindowIdentity has tagged the window, so read the window
                 // itself once it exists (a window restored minimised is not visible).
@@ -111,6 +119,18 @@ private struct MenuPanelScene: View {
                 model.menuPanelVisible = true
             }
             .onDisappear { model.menuPanelVisible = false }
+    }
+}
+
+/// The menu bar icon is drawn from launch, so it hands over openWindow even when no
+/// window appears (a login item launch) and the menu bar panel has not been opened.
+/// Without it, a notification click or an alert could not open the main window.
+private struct MenuBarLabelScene: View {
+    @Environment(\.openWindow) private var openWindow
+    let animator: MenuBarAnimator
+    let delegate: RunningManAppDelegate
+    var body: some View {
+        MenuBarLabel(animator: animator).onAppear { delegate.sceneAppeared(openWindow: openWindow) }
     }
 }
 
@@ -170,22 +190,45 @@ private struct WindowIdentity: NSViewRepresentable {
     static let mainWindowIdentifier = NSUserInterfaceItemIdentifier("RunningManMain")
     weak var model: AppModel?
     weak var updates: AppUpdateChecker?
-    /// From the latest scene to appear (main window or menu bar panel); it can
-    /// reopen the main window after it was closed.
+    weak var backgroundMode: BackgroundMode?
+    /// From the latest scene to appear (main window, menu bar panel or menu bar icon);
+    /// it can reopen the main window after it was closed.
     private var openWindow: OpenWindowAction?
     private var pendingWidgetOpen = false
+    /// From the main window's appearance until it closes; a minimised window is open.
+    private var mainWindowOpen = false
 
     /// Monitoring and update checks start here rather than in the main window's
     /// onAppear: the window is not always presented at launch (state restoration,
-    /// a bare launch argument), and the menu bar and stop-after-job need them anyway.
+    /// a bare launch argument, a login item launch), and the menu bar, widgets and
+    /// stop-after-job need them anyway.
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let model else { return }
         model.showMainWindow = { [weak self] in self?.showMainWindow() }
         for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.willCloseNotification] {
             NotificationCenter.default.addObserver(self, selector: #selector(windowVisibilityChanged(_:)), name: name, object: nil)
         }
+        backgroundMode?.changed = { [weak self] in self?.updateDockIcon() }
+        updateDockIcon()
         model.startMonitoring()
         updates?.startAutomatic()
+    }
+
+    func mainWindowAppeared() {
+        mainWindowOpen = true
+        updateDockIcon()
+    }
+
+    /// Background mode keeps RunningMan out of the Dock while its main window is closed.
+    private func updateDockIcon() {
+        guard let backgroundMode else { return }
+        let policy = BackgroundMode.activationPolicy(enabled: backgroundMode.isEnabled, mainWindowOpen: mainWindowOpen)
+        if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
+    }
+
+    /// Picks up a login item changed in System Settings; a change updates the Dock icon.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        backgroundMode?.refresh()
     }
 
     func sceneAppeared(openWindow: OpenWindowAction) {
@@ -215,7 +258,12 @@ private struct WindowIdentity: NSViewRepresentable {
     /// display sleeping all change occlusion; closing posts willClose first.
     @objc private func windowVisibilityChanged(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, window.identifier == Self.mainWindowIdentifier else { return }
-        model?.mainWindowVisible = notification.name != NSWindow.willCloseNotification && window.occlusionState.contains(.visible)
+        let closing = notification.name == NSWindow.willCloseNotification
+        model?.mainWindowVisible = !closing && window.occlusionState.contains(.visible)
+        if closing {
+            mainWindowOpen = false
+            updateDockIcon()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
