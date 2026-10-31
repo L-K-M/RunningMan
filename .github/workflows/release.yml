@@ -74,6 +74,9 @@ jobs:
       - name: Run tests
         run: swift test
 
+      - name: Check sandboxed widget home lookup
+        run: scripts/check-widget-home.sh
+
       - name: Build universal app
         run: RUNNINGMAN_VERSION="${TAG#v}" scripts/build-app.sh --universal --zip
 

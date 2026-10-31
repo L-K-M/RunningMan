@@ -31,6 +31,8 @@ jobs:
           swift --version
       - name: Test synthetic runner fixtures
         run: swift test
+      - name: Check sandboxed widget home lookup
+        run: scripts/check-widget-home.sh
       - name: Build universal app
         run: scripts/build-app.sh --universal --zip
       - name: Check bundled license

@@ -113,6 +113,11 @@ No network, subprocess, runner-file or credential access is granted. The host
 remains unsandboxed for its existing launchd responsibilities. Widget URLs accept
 only navigation to Overview and Job history.
 
+The provider resolves the account's home with `getpwuid_r`: Foundation's home
+lookups, including `homeDirectory(forUser:)` for the current account, return the
+extension's container. `scripts/check-widget-home.sh` checks the production lookup
+in a separate app signed with the widget entitlements, without reading live data.
+
 ## Background mode
 
 Background mode is RunningMan's own login item (`SMAppService.mainApp`), separate
