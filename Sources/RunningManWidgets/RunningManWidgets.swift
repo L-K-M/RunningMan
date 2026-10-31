@@ -71,9 +71,7 @@ private struct StatsProvider: TimelineProvider {
     }
 
     private func load() async -> WidgetSnapshot? {
-        // homeDirectoryForCurrentUser points at the extension's sandbox. Look up
-        // the account's home instead; the entitlement grants only Widgets/ reads.
-        guard let home = FileManager.default.homeDirectory(forUser: NSUserName()) else { return nil }
+        guard let home = WidgetAccount.homeDirectory else { return nil }
         return try? await WidgetSnapshotStore(fileURL: WidgetSnapshotStore.fileURL(homeDirectory: home)).load()
     }
 }
